@@ -815,24 +815,37 @@ async function responderOracion(msgOriginal) {
     const nombre = sujeto.replace(/\b\w/g, (c) => c.toUpperCase());
     const definicion = memoria.get(sujeto);
     if (definicion) {
-      return `✅ Entendí el contexto de tu oración: preguntas qué es ${nombre}.\n\n💬 ${nombre} es ${definicion}.`;
+      return `Claro, ${nombre} es ${definicion}. ¿Quieres que te cuente algo más sobre el tema?`;
     }
     progreso(`🌐 No lo tengo en memoria. Busco "${nombre}" en Wikipedia...`);
     const wiki = await buscarResumenWikipedia(nombre);
     if (wiki) {
-      return `✅ Entendí el contexto de tu oración: preguntas qué es ${nombre}.\n\n🌐 Según Wikipedia (${wiki.titulo}): ${wiki.primeraFrase}\n\n💡 Si quieres que la recuerde, escribe: "Aprende que ${sujeto} significa ${wiki.primeraFrase}"`;
+      return `No sabía eso, pero busqué "${nombre}" y encontré esto: ${wiki.primeraFrase}\n\nLo saqué de Wikipedia (${wiki.titulo}). Si quieres que lo recuerde, dime "Aprende que ${sujeto} significa" seguido de la definición.`;
     }
-    return `✅ Entendí el contexto de tu oración: preguntas qué es ${nombre}.\n\n❓ No encontré "${nombre}" en Wikipedia ni lo tengo registrado. Enséñamelo con "Aprende que ${sujeto} significa [definición]".`;
+    return `Mmm, no sé qué es ${nombre} y tampoco encontré nada en Wikipedia. ¿Me lo explicas tú? Así puedo aprenderlo.`;
   }
 
   if (conocidas.length === 0) return null;
 
   const combinado = conocidas.map((c) => c.sig[0].texto).join(" + ");
-  let resp = `✅ Entendí el contexto de tu oración (${esPregunta ? "pregunta" : "enunciado"}).\n\n🔗 Significado combinado: ${combinado}`;
-  if (desconocidas.length) {
-    resp += `\n\n❓ No conozco: ${desconocidas.map((d) => `"${d}"`).join(", ")}.`;
+  // Solo da definiciones si la persona las pide explícitamente
+  const pideDefinicion = /\b(que significa|que quiere decir|significa|definicion de|que son)\b/.test(norm);
+  if (pideDefinicion) {
+    const conDefinicion = conocidas.filter((c) => c.sig.some((s) => s.fuente === "memoria"));
+    if (conDefinicion.length) {
+      const frases = conDefinicion.map((c) => {
+        const mem = c.sig.find((s) => s.fuente === "memoria");
+        return `${c.palabra} significa ${mem.texto}`;
+      });
+      return `${frases.join(". ")}.`;
+    }
   }
-  return resp;
+
+  // Conversación normal: responder sin definiciones
+  if (desconocidas.length) {
+    return `Entendido. Hay palabras que todavía no conozco: ${desconocidas.map((d) => `"${d}"`).join(", ")}. ¿Me explicas qué significan?`;
+  }
+  return "Entendido. ¿Quieres que te explique alguna de esas palabras?";
 }
 
 async function procesarComando(msgOriginal) {
@@ -864,6 +877,19 @@ async function procesarComando(msgOriginal) {
 
   if (resultadosAprendizaje.length > 0) {
     return resultadosAprendizaje.join("\n");
+  }
+
+  // 2a. Preguntas personales y conversación (no son preguntas de definición)
+  const respuestasPersonales = [
+    [/\b(en serio|enserio|de verdad)\b.*\bestas bien\b|\bestas bien\b.*\b(en serio|enserio|de verdad)\b/, "Sí, en serio estoy bien. ¿Y tú cómo estás?"],
+    [/\b(que eres|quien eres|como te llamas|eres una ia|eres un robot)\b/, "Soy Eloboth, un agente que aprende de las personas que lo usan. ¿Y tú cómo te llamas?"],
+    [/\b(estas bien|como estas|que tal estas|te sientes)\b/, "Estoy bien, gracias por preguntar. ¿Y tú cómo estás?"],
+    [/\b(estas mal|estas triste|estas enojad[oa])\b/, "Estoy bien, aunque me preocupa cómo estás tú. ¿Pasó algo?"],
+    [/\b(estoy triste|estoy mal|me siento mal|estoy cansad[oa]|estoy solo|estoy sola|estoy preocupad[oa])\b/, "Lamento que te sientas así. ¿Quieres contarme qué pasó?"],
+    [/\b(en serio|enserio|de verdad)\b/, "Sí, en serio. ¿Por qué lo preguntas?"]
+  ];
+  for (const [patron, respuesta] of respuestasPersonales) {
+    if (patron.test(norm)) return respuesta;
   }
 
   // 2b. Análisis del archivo adjunto (por ejemplo "analiza el archivo")
