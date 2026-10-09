@@ -759,6 +759,26 @@ async function interpretarOracion(msgOriginal) {
 }
 
 // ---------- Respuesta final tras mostrar el proceso ----------
+// Palabras que no aportan tema (artículos, preposiciones, verbos auxiliares)
+const PALABRAS_VACIAS = ["la", "el", "los", "las", "un", "una", "unos", "unas", "de", "del", "al", "a", "y", "o", "en", "por", "para", "con", "le", "lo", "me", "te", "se", "su", "sus", "mi", "tu", "que", "es", "fue", "son", "era", "eso", "esto", "esa", "ese"];
+
+// Toma la última frase de palabras desconocidas, que suele ser el tema de la pregunta
+function temaDesconocido(palabras, memoria) {
+  const tema = [];
+  for (let i = palabras.length - 1; i >= 0; i--) {
+    const limpia = palabras[i].replace(/[¿?¡!.,;:]/g, "");
+    const n = normalizarTexto(limpia);
+    if (!n) continue;
+    if (PALABRAS_VACIAS.includes(n)) {
+      if (tema.length) break;
+      continue;
+    }
+    if (significadosDePalabra(n, memoria).length) break;
+    tema.unshift(limpia);
+  }
+  return tema.length ? tema.join(" ") : null;
+}
+
 // Resumen de Wikipedia (primer párrafo) para un término concreto
 async function buscarResumenWikipedia(termino) {
   try {
@@ -768,7 +788,8 @@ async function buscarResumenWikipedia(termino) {
     const paginas = data.query?.pages ? Object.values(data.query.pages) : [];
     const pagina = paginas.find((p) => p.extract && !("missing" in p));
     if (!pagina) return null;
-    const primeraFrase = pagina.extract.trim().split(/(?<=\.)\s/)[0];
+    let primeraFrase = pagina.extract.trim().split(/(?<=\.)\s/)[0];
+    if (primeraFrase.length > 300) primeraFrase = primeraFrase.slice(0, 297) + "...";
     return { titulo: pagina.title, primeraFrase };
   } catch (e) {
     return null;
@@ -776,6 +797,46 @@ async function buscarResumenWikipedia(termino) {
 }
 
 let progreso = () => {};
+let busquedaPendiente = null; // tema que Eloboth ofreció buscar
+
+// ¿El texto menciona alguna palabra del tema? (evita resultados que no tienen que ver)
+function coincide(texto, tema) {
+  const t = normalizarTexto(texto);
+  return normalizarTexto(tema).split(/\s+/).filter((w) => w.length > 2).some((w) => t.includes(w));
+}
+
+// Enlaces de búsqueda directa, solo para cuando no hay resultados útiles
+function enlacesRedes(tema) {
+  const q = encodeURIComponent(tema);
+  return `• Instagram: https://www.instagram.com/explore/tags/${encodeURIComponent(tema.replace(/\s+/g, ""))}/\n` +
+    `• Facebook: https://www.facebook.com/search/top?q=${q}\n` +
+    `• Reddit: https://www.reddit.com/search/?q=${q}\n` +
+    `• GitHub: https://github.com/search?q=${q}`;
+}
+
+// Búsqueda en GitHub y Reddit: solo devuelve resultados que coinciden con el tema
+async function buscarEnRedes(tema) {
+  const q = encodeURIComponent(tema);
+  const partes = [];
+  try {
+    const r = await fetch(`https://api.github.com/search/repositories?q=${q}&per_page=3`);
+    const d = await r.json();
+    const utiles = (d.items || []).filter((i) => coincide(`${i.full_name} ${i.description || ""}`, tema));
+    if (utiles.length) {
+      partes.push("🐙 GitHub:\n" + utiles.map((i) => `• ${i.full_name}: ${i.html_url}`).join("\n"));
+    }
+  } catch (e) {}
+  try {
+    const r = await fetch(`https://www.reddit.com/search.json?q=${q}&limit=3`);
+    const d = await r.json();
+    const posts = (d.data && d.data.children) || [];
+    const utiles = posts.filter((p) => coincide(p.data.title, tema));
+    if (utiles.length) {
+      partes.push("🟠 Reddit:\n" + utiles.map((p) => `• ${p.data.title}: https://www.reddit.com${p.data.permalink}`).join("\n"));
+    }
+  } catch (e) {}
+  return partes.join("\n\n");
+}
 const esperar = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function responderOracion(msgOriginal) {
@@ -806,10 +867,11 @@ async function responderOracion(msgOriginal) {
   const norm = normalizarTexto(msgOriginal);
   const PALABRAS_INTERROGATIVAS = ["que", "quien", "quienes", "cual", "cuales", "como", "donde", "adonde", "cuando", "cuanto", "cuanta", "cuantos", "cuantas", "por", "para"];
   const primera = normalizarTexto(palabrasOriginales[0] || "");
-  const esPregunta = PALABRAS_INTERROGATIVAS.includes(primera) || msgOriginal.includes("?");
+  const esPregunta = PALABRAS_INTERROGATIVAS.includes(primera) || msgOriginal.includes("?")
+    || palabrasOriginales.some((p) => ["que", "quien", "quienes", "cual", "cuales", "donde", "cuando", "cuanto"].includes(normalizarTexto(p)));
 
-  // "qué es X" / "quién es X": responde con lo que sabe de X
-  const pregunta = norm.match(/^(que|quien|quienes)\s+(es|son)\s+(.+)$/);
+  // "qué es X" / "quién es X" (aunque vaya al medio de la oración): responde con lo que sabe de X
+  const pregunta = norm.match(/\b(que|quien|quienes)\s+(es|son)\s+(.+)$/);
   if (pregunta) {
     const sujeto = pregunta[3].trim();
     const nombre = sujeto.replace(/\b\w/g, (c) => c.toUpperCase());
@@ -817,14 +879,27 @@ async function responderOracion(msgOriginal) {
     if (definicion) {
       return `Claro, ${nombre} es ${definicion}. ¿Quieres que te cuente algo más sobre el tema?`;
     }
-    progreso(`🌐 No lo tengo en memoria. Busco "${nombre}" en Wikipedia...`);
-    const wiki = await buscarResumenWikipedia(nombre);
-    if (wiki) {
-      return `No sabía eso, pero busqué "${nombre}" y encontré esto: ${wiki.primeraFrase}\n\nLo saqué de Wikipedia (${wiki.titulo}). Si quieres que lo recuerde, dime "Aprende que ${sujeto} significa" seguido de la definición.`;
-    }
-    return `Mmm, no sé qué es ${nombre} y tampoco encontré nada en Wikipedia. ¿Me lo explicas tú? Así puedo aprenderlo.`;
+    busquedaPendiente = nombre;
+    return `No sé qué es ${nombre}. ¿Quieres que lo busque en Wikipedia, Reddit y GitHub? También te dejo enlaces para Instagram y Facebook.`;
   }
 
+  if (esPregunta) {
+    const tema = temaDesconocido(palabrasOriginales, memoria);
+    if (tema) {
+      busquedaPendiente = tema;
+      return `No lo sé: "${tema}". ¿Quieres que lo busque en Wikipedia, Reddit y GitHub? También te dejo enlaces para Instagram y Facebook.`;
+    }
+  }
+  // Palabras desconocidas sin pregunta: sugerir buscarlas en redes sociales
+  if (conocidas.length === 0 && desconocidas.length) {
+    const tema = desconocidas.join(" ");
+    const q = encodeURIComponent(tema);
+    return `No conozco "${tema}". Puedes buscarlo en redes sociales:\n` +
+      `• Instagram: https://www.instagram.com/explore/tags/${encodeURIComponent(tema.replace(/\s+/g, ""))}/\n` +
+      `• Facebook: https://www.facebook.com/search/top?q=${q}\n` +
+      `• Reddit: https://www.reddit.com/search/?q=${q}\n` +
+      `• GitHub: https://github.com/search?q=${q}`;
+  }
   if (conocidas.length === 0) return null;
 
   const combinado = conocidas.map((c) => c.sig[0].texto).join(" + ");
@@ -855,6 +930,26 @@ async function procesarComando(msgOriginal) {
   // 1. Saludo estricto
   if (norm === "hola") {
     return "¡Hola!";
+  }
+
+  // 1b. Respuesta a la oferta de buscar en Wikipedia
+  if (busquedaPendiente) {
+    const tema = busquedaPendiente;
+    busquedaPendiente = null;
+    if (/^(si|sip|claro|dale|busca|buscalo|buscala|ok|okay|por favor)\b/.test(norm)) {
+      const wiki = await buscarResumenWikipedia(tema);
+      const redes = await buscarEnRedes(tema);
+      let resp = wiki
+        ? `Encontré esto sobre "${tema}" en Wikipedia: ${wiki.primeraFrase}\n\nFuente: ${wiki.titulo}.`
+        : `No encontré "${tema}" en Wikipedia.`;
+      resp += redes
+        ? `\n\n${redes}`
+        : `\n\nNo encontré nada útil en GitHub ni Reddit. Puedes probar en estos enlaces:\n${enlacesRedes(tema)}`;
+      return resp;
+    }
+    if (/^(no|nop|no gracias|mejor no)\b/.test(norm)) {
+      return "Está bien. Si quieres, pregúntame otra cosa.";
+    }
   }
 
   // 2. Aprendizaje ("Aprende que X significa Y"), una por línea
@@ -1010,7 +1105,7 @@ async function procesarComando(msgOriginal) {
   }
 
   // 8. Interpretación de la oración con las palabras que conoce
-  if (palabras.length > 1) {
+  if (palabras.length > 1 || msgOriginal.includes("?")) {
     const interpretacion = await responderOracion(msgOriginal);
     if (interpretacion) return interpretacion;
   }
