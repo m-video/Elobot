@@ -234,6 +234,35 @@
     .msg { max-width: 88%; font-size: 14px; }
     header { padding: 10px 14px; }
   }
+  /* ---------- Celular y tablet ---------- */
+  @media (max-width: 900px) {
+    #barra { width: 220px; }
+  }
+  @media (max-width: 700px) {
+    #cuerpo { flex-direction: column; }
+    #barra {
+      width: 100%; max-height: 150px; border-right: 0; border-bottom: 1px solid var(--borde);
+      padding: 10px 12px; gap: 8px;
+    }
+    #barra h3 { display: none; }
+    #nuevaChat { width: auto; align-self: flex-start; padding: 8px 14px; }
+    #listaChats { flex-direction: row; overflow-x: auto; overflow-y: hidden; gap: 8px; padding-bottom: 4px; }
+    .chat-item { min-width: 170px; max-width: 220px; flex-shrink: 0; }
+    .msg { max-width: 92%; }
+    #chat { padding: 16px 10px; }
+    #entrada { padding: 10px; }
+    #entrada .fila { padding: 6px 6px 6px 10px; }
+    #enviar { padding: 10px 14px; }
+    .previa { margin: 0 0 8px; }
+    .login-robot { width: 110px; height: 110px; border-radius: 34px; }
+    #login-container h2 { font-size: 22px; }
+    header .marca b { font-size: 15px; }
+    header { padding: 10px 12px; }
+  }
+  @media (max-width: 380px) {
+    #enviar { padding: 10px; }
+    .boton { padding: 7px 10px; font-size: 13px; }
+  }
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation: none !important; transition: none !important; }
   }
@@ -517,6 +546,32 @@ function pintarMensaje(textoMsj, clase) {
     div.textContent = textoMsj;
   }
   fila.appendChild(div);
+
+  // Si el mensaje trae un bloque HTML, se puede ejecutar aislado en un marco dentro de la página
+  const bloqueHtml = !clase.includes("svg") && textoMsj.match(/```html\n([\s\S]*?)\n```/);
+  if (bloqueHtml) {
+    const contenedor = document.createElement("div");
+    const boton = document.createElement("button");
+    boton.type = "button";
+    boton.className = "boton";
+    boton.style.marginTop = "10px";
+    boton.textContent = "▶ Ejecutar en esta página";
+    boton.onclick = () => {
+      if (contenedor.firstChild) {
+        contenedor.innerHTML = "";
+        boton.textContent = "▶ Ejecutar en esta página";
+      } else {
+        const marco = document.createElement("iframe");
+        marco.setAttribute("sandbox", "allow-scripts");
+        marco.srcdoc = bloqueHtml[1];
+        marco.style.cssText = "width:100%;height:360px;border:1px solid var(--borde);border-radius:12px;margin-top:10px;background:#fff;";
+        contenedor.appendChild(marco);
+        boton.textContent = "✖ Ocultar";
+      }
+    };
+    div.appendChild(boton);
+    div.appendChild(contenedor);
+  }
   mensajes.appendChild(fila);
   chatSection.scrollTop = chatSection.scrollHeight;
   return fila;
@@ -552,6 +607,11 @@ async function buscarEnWikipedia(termino) {
 }
 
 async function buscarMemoriaAprendida(termino) {
+  const mapa = await cargarMemoriaMapa();
+  return mapa.get(normalizarTexto(termino)) || null;
+}
+
+async function buscarMemoriaAntigua(termino) {
   if (!db) return null;
   try {
     const querySnapshot = await getDocs(collection(db, "eloboth_aprendizajes"));
@@ -576,10 +636,12 @@ async function guardarAprendizajeFirestore(palabra, definicion) {
   try {
     await addDoc(collection(db, "eloboth_aprendizajes"), {
       palabra: palabra.trim(),
+      palabraNorm: normalizarTexto(palabra),
       definicion: definicion.trim(),
       usuario: usuarioActual || "Anónimo",
       fecha: new Date().toISOString()
     });
+    if (memoriaCache) memoriaCache.set(normalizarTexto(palabra), definicion.trim());
     return { ok: true };
   } catch (err) {
     console.error("Error al escribir en Firestore:", err);
@@ -687,8 +749,12 @@ function construirIndiceConjugaciones() {
 const INDICE_CONJ = construirIndiceConjugaciones();
 
 // ---------- Interpretación palabra por palabra ----------
+// La memoria se lee de Firestore una sola vez por sesión y después se consulta en local
+let memoriaCache = null;
 async function cargarMemoriaMapa() {
+  if (memoriaCache) return memoriaCache;
   const mapa = new Map();
+  memoriaCache = mapa;
   if (!db) return mapa;
   try {
     const snap = await getDocs(collection(db, "eloboth_aprendizajes"));
@@ -698,6 +764,7 @@ async function cargarMemoriaMapa() {
     });
   } catch (err) {
     console.error("Error al cargar la memoria:", err);
+    memoriaCache = null;
   }
   return mapa;
 }
@@ -923,6 +990,45 @@ async function responderOracion(msgOriginal) {
   return "Entendido. ¿Quieres que te explique alguna de esas palabras?";
 }
 
+// Página HTML a partir de la descripción: toma el tema (después de "de", "sobre" o "para") y un color opcional
+function generarPaginaHtml(descripcion) {
+  const COLORES = { azul: "#1a4a8a", rojo: "#c62828", verde: "#2e7d32", amarillo: "#f9a825", morado: "#6a1b9a", negro: "#111111", rosa: "#ad1457" };
+  const partes = descripcion.split(/\s+/);
+  const normPartes = partes.map((p) => normalizarTexto(p));
+  const color = normPartes.find((p) => COLORES[p]);
+  const fondo = color ? COLORES[color] : "#1a4a8a";
+
+  const inicio = normPartes.findIndex((p) => ["de", "sobre", "para"].includes(p));
+  let temaPalabras = inicio >= 0 ? partes.slice(inicio + 1) : [];
+  temaPalabras = temaPalabras.filter((p) => !COLORES[normalizarTexto(p)]);
+  if (temaPalabras.length && ["una", "un", "el", "la"].includes(normalizarTexto(temaPalabras[0]))) {
+    temaPalabras.shift();
+  }
+  const tema = temaPalabras.join(" ").trim();
+  const titulo = (tema ? tema.charAt(0).toUpperCase() + tema.slice(1) : "Mi página")
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+  return `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${titulo}</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; min-height: 100vh; background: ${fondo}; color: #fff; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 24px; }
+    h1 { font-size: 2.5rem; margin-bottom: 8px; }
+    p { max-width: 560px; line-height: 1.6; opacity: .9; }
+    button { margin-top: 20px; padding: 12px 24px; border: 0; border-radius: 10px; background: #fff; color: ${fondo}; font-weight: 700; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h1>${titulo}</h1>
+  <p>Bienvenido a ${titulo.toLowerCase()}. Edita este texto para describir tu proyecto.</p>
+  <button onclick="alert('¡Gracias por visitarnos!')">Saber más</button>
+</body>
+</html>`;
+}
+
 async function procesarComando(msgOriginal) {
   const norm = normalizarTexto(msgOriginal);
   const palabras = tokenizarPalabras(msgOriginal);
@@ -1045,6 +1151,71 @@ async function procesarComando(msgOriginal) {
     formulario: `<form action="#" method="post">\n  <label for="nombre">Nombre:</label>\n  <input type="text" id="nombre" name="nombre">\n  <button type="submit">Enviar</button>\n</form>`,
     lista: `<ul>\n  <li>Elemento 1</li>\n  <li>Elemento 2</li>\n  <li>Elemento 3</li>\n</ul>`,
     tabla: `<table>\n  <thead>\n    <tr><th>Nombre</th><th>Edad</th></tr>\n  </thead>\n  <tbody>\n    <tr><td>Ana</td><td>25</td></tr>\n  </tbody>\n</table>`,
+    snake: `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>Snake</title>
+  <style>
+    body { margin: 0; background: #070b1a; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; color: #e6ecff; font-family: system-ui, sans-serif; }
+    canvas { background: #0d1330; border: 2px solid #00e5ff; border-radius: 10px; }
+    p { margin: 8px; }
+  </style>
+</head>
+<body>
+  <h2>Snake</h2>
+  <canvas id="c" width="400" height="400"></canvas>
+  <p id="pts">Puntos: 0 · Usa las flechas (haz clic en el juego primero)</p>
+  <script>
+    const c = document.getElementById("c"), g = c.getContext("2d"), T = 20, N = 20;
+    let cuerpo, dir, comida, pts, vivo, loop;
+    function reiniciar() {
+      cuerpo = [{ x: 10, y: 10 }];
+      dir = { x: 1, y: 0 };
+      pts = 0; vivo = true;
+      ponerComida();
+      clearInterval(loop);
+      loop = setInterval(paso, 120);
+    }
+    function ponerComida() {
+      do {
+        comida = { x: Math.floor(Math.random() * N), y: Math.floor(Math.random() * N) };
+      } while (cuerpo.some((s) => s.x === comida.x && s.y === comida.y));
+    }
+    function paso() {
+      if (!vivo) return;
+      const cab = { x: cuerpo[0].x + dir.x, y: cuerpo[0].y + dir.y };
+      if (cab.x < 0 || cab.y < 0 || cab.x >= N || cab.y >= N || cuerpo.some((s) => s.x === cab.x && s.y === cab.y)) {
+        vivo = false;
+        clearInterval(loop);
+        document.getElementById("pts").textContent = "Game over · Puntos: " + pts + " · Pulsa Enter para reiniciar";
+        return;
+      }
+      cuerpo.unshift(cab);
+      if (cab.x === comida.x && cab.y === comida.y) { pts++; ponerComida(); } else { cuerpo.pop(); }
+      dibujar();
+      document.getElementById("pts").textContent = "Puntos: " + pts;
+    }
+    function dibujar() {
+      g.fillStyle = "#0d1330";
+      g.fillRect(0, 0, c.width, c.height);
+      g.fillStyle = "#ff4d6d";
+      g.fillRect(comida.x * T, comida.y * T, T - 2, T - 2);
+      cuerpo.forEach((s, i) => {
+        g.fillStyle = i === 0 ? "#00e5ff" : "#6c4cff";
+        g.fillRect(s.x * T, s.y * T, T - 2, T - 2);
+      });
+    }
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !vivo) { reiniciar(); return; }
+      const m = { ArrowUp: { x: 0, y: -1 }, ArrowDown: { x: 0, y: 1 }, ArrowLeft: { x: -1, y: 0 }, ArrowRight: { x: 1, y: 0 } }[e.key];
+      if (m && !(m.x === -dir.x && m.y === -dir.y)) { dir = m; e.preventDefault(); }
+    });
+    reiniciar();
+    dibujar();
+  <\/script>
+</body>
+</html>`,
     enlace: `<a href="https://www.ejemplo.com" target="_blank">Visita el sitio</a>`,
     imagen: `<img src="imagen.jpg" alt="Descripción de la imagen" width="300">`,
     parrafo: `<p>Este es un párrafo de ejemplo.</p>`,
@@ -1056,7 +1227,7 @@ async function procesarComando(msgOriginal) {
     if (!clave && palabras.includes("link")) clave = "enlace";
     if (!clave) clave = "pagina";
     const nombre = clave === "pagina" ? "una página" : clave;
-    return `Aquí tienes HTML de ${nombre}:\n\`\`\`html\n${PLANTILLAS_HTML[clave]}\n\`\`\``;
+    return `Aquí tienes HTML de ${nombre}:\n\`\`\`html\n${clave === "pagina" ? generarPaginaHtml(msgOriginal) : PLANTILLAS_HTML[clave]}\n\`\`\``;
   }
 
   // 5. Generador de código "print"
