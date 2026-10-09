@@ -281,6 +281,8 @@
     <button type="button" class="boton" id="quitarImg">Quitar</button>
   </div>
   <div class="fila">
+    <button type="button" class="boton" id="adjuntar" title="Adjuntar archivo">📎</button>
+    <input type="file" id="archivoInput" hidden>
     <textarea id="texto" rows="1" placeholder="Escribe tu mensaje o: Aprende que X significa Y"></textarea>
     <button class="boton principal" id="enviar" type="submit">Enviar</button>
   </div>
@@ -509,7 +511,11 @@ function pintarMensaje(textoMsj, clase) {
   if (clase !== "usuario") fila.insertAdjacentHTML("beforeend", MINI_ROBOT);
   const div = document.createElement("div");
   div.className = "msg " + clase;
-  div.textContent = textoMsj;
+  if (clase.includes("svg")) {
+    div.innerHTML = textoMsj; // solo dibujos predefinidos del código
+  } else {
+    div.textContent = textoMsj;
+  }
   fila.appendChild(div);
   mensajes.appendChild(fila);
   chatSection.scrollTop = chatSection.scrollHeight;
@@ -860,6 +866,15 @@ async function procesarComando(msgOriginal) {
     return resultadosAprendizaje.join("\n");
   }
 
+  // 2b. Análisis del archivo adjunto (por ejemplo "analiza el archivo")
+  const VERBOS_ARCHIVO = ["analiza", "analizar", "analisis", "revisa", "revisar", "resume", "resumen", "resumir", "describe", "describir", "lee", "leer", "contenido", "dice", "explica", "explicar"];
+  if (palabras.some((p) => ["archivo", "adjunto", "documento"].includes(p) || VERBOS_ARCHIVO.includes(p))) {
+    if (archivoActual) return analizarArchivo(archivoActual);
+    if (palabras.some((p) => ["archivo", "adjunto", "documento"].includes(p))) {
+      return "📎 Todavía no has adjuntado ningún archivo. Usa el botón 📎 o pégalo y luego escribe \"analiza el archivo\".";
+    }
+  }
+
   // 3. Consulta a Wikipedia bajo demanda
   if (palabras.includes("wikipedia") || norm.includes("busca en wiki") || norm.includes("investiga")) {
     const termino = msgOriginal.replace(/wikipedia|busca en wiki|investiga|sobre|de/gi, "").trim() || msgOriginal;
@@ -870,6 +885,37 @@ async function procesarComando(msgOriginal) {
   if (norm.startsWith("genera oraciones") || norm.startsWith("formula oraciones")) {
     const palabra = msgOriginal.replace(/genera oraciones|formula oraciones|de|para/gi, "").trim() || "concepto";
     return generarListaMasivaOraciones(palabra);
+  }
+
+  // 4a. Dibujos SVG con descripción (solo dibujos predefinidos; nunca se inserta texto del usuario)
+  const rayosSol = Array.from({ length: 8 }, (_, i) => {
+    const a = (i * Math.PI) / 4;
+    const x1 = (100 + Math.cos(a) * 50).toFixed(1), y1 = (100 + Math.sin(a) * 50).toFixed(1);
+    const x2 = (100 + Math.cos(a) * 78).toFixed(1), y2 = (100 + Math.sin(a) * 78).toFixed(1);
+    return `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#ffb703" stroke-width="8" stroke-linecap="round"/>`;
+  }).join("");
+  const DIBUJOS = {
+    sol: { desc: "Un sol: un círculo amarillo con rayos a su alrededor.", svg: `${rayosSol}<circle cx="100" cy="100" r="36" fill="#ffd23f"/>` },
+    luna: { desc: "Una luna creciente sobre el fondo de la noche.", svg: `<circle cx="100" cy="100" r="60" fill="#f4e04d"/><circle cx="125" cy="85" r="52" fill="#0d1330"/>` },
+    estrella: { desc: "Una estrella amarilla de cinco puntas.", svg: `<polygon points="100,20 120,75 180,75 132,110 150,170 100,135 50,170 68,110 20,75 80,75" fill="#ffd23f"/>` },
+    corazon: { desc: "Un corazón rojo, símbolo de cariño.", svg: `<path d="M100 170 C20 110 20 50 60 45 C80 42 95 55 100 70 C105 55 120 42 140 45 C180 50 180 110 100 170 Z" fill="#ff4d6d"/>` },
+    nube: { desc: "Una nube blanca hecha de círculos.", svg: `<circle cx="70" cy="110" r="30" fill="#e6ecff"/><circle cx="110" cy="95" r="38" fill="#e6ecff"/><circle cx="145" cy="115" r="28" fill="#e6ecff"/><rect x="60" y="110" width="113" height="30" rx="15" fill="#e6ecff"/>` },
+    casa: { desc: "Una casa con techo triangular, puerta y dos ventanas.", svg: `<rect x="60" y="100" width="80" height="70" fill="#f4a261"/><polygon points="50,100 100,55 150,100" fill="#e76f51"/><rect x="90" y="130" width="20" height="40" fill="#6b4226"/><rect x="68" y="112" width="16" height="16" fill="#8ecae6"/><rect x="116" y="112" width="16" height="16" fill="#8ecae6"/>` },
+    arbol: { desc: "Un árbol con tronco marrón y copa verde.", svg: `<rect x="90" y="120" width="20" height="60" fill="#8b5a2b"/><circle cx="100" cy="90" r="45" fill="#2a9d8f"/><circle cx="75" cy="110" r="30" fill="#2a9d8f"/><circle cx="125" cy="110" r="30" fill="#2a9d8f"/>` },
+    flor: { desc: "Una flor de pétalos rosados con centro amarillo y tallo verde.", svg: `<line x1="100" y1="110" x2="100" y2="180" stroke="#2a9d8f" stroke-width="6"/><circle cx="100" cy="50" r="22" fill="#ff8fab"/><circle cx="130" cy="80" r="22" fill="#ff8fab"/><circle cx="100" cy="110" r="22" fill="#ff8fab"/><circle cx="70" cy="80" r="22" fill="#ff8fab"/><circle cx="100" cy="80" r="18" fill="#ffd23f"/>` },
+    pez: { desc: "Un pez azul con cola triangular y ojo negro.", svg: `<ellipse cx="95" cy="100" rx="55" ry="32" fill="#4cc9f0"/><polygon points="148,100 180,70 180,130" fill="#4cc9f0"/><circle cx="70" cy="92" r="6" fill="#05070f"/>` },
+    robot: { desc: "Un robot con ojos cian, antena y cuerpo gris, como Eloboth.", svg: `<line x1="100" y1="30" x2="100" y2="50" stroke="#6c4cff" stroke-width="4"/><circle cx="100" cy="28" r="7" fill="#00e5ff"/><rect x="55" y="50" width="90" height="70" rx="18" fill="#2c3557"/><rect x="70" y="70" width="60" height="36" rx="10" fill="#05070f"/><circle cx="85" cy="88" r="8" fill="#00e5ff"/><circle cx="115" cy="88" r="8" fill="#00e5ff"/><rect x="75" y="130" width="50" height="45" rx="10" fill="#1f2640"/>` }
+  };
+  const SVG_HABILITADO = false; // Generación de dibujos desactivada por ahora
+  if (!SVG_HABILITADO && palabras.some((p) => p.startsWith("dibuj"))) {
+    return "🚧 Por ahora no puedo generar dibujos SVG. Puedo ayudarte con texto, código HTML o analizar archivos adjuntos.";
+  }
+  if (SVG_HABILITADO && palabras.some((p) => p.startsWith("dibuj"))) {
+    const clave = Object.keys(DIBUJOS).find((k) => palabras.includes(k));
+    if (!clave) {
+      return "🎨 Puedo dibujar: sol, luna, estrella, corazón, nube, casa, árbol, flor, pez o robot. Ejemplo: \"dibuja un robot\".";
+    }
+    return `<svg viewBox="0 0 200 200" width="200" height="200" xmlns="http://www.w3.org/2000/svg">${DIBUJOS[clave].svg}</svg><p style="margin:8px 0 0">${DIBUJOS[clave].desc}</p>`;
   }
 
   // 4b. Escribir HTML según lo que pida (botón, formulario, tabla, página, etc.)
@@ -981,8 +1027,8 @@ texto.addEventListener("paste", (e) => {
   reader.readAsDataURL(file);
 });
 
-function agregarImagen(imagen) {
-  const fila = agregarMensaje("📷 Imagen pegada", "usuario");
+function agregarImagen(imagen, textoExtra = "") {
+  const fila = agregarMensaje(textoExtra || "📷 Imagen pegada", "usuario");
   const div = fila.querySelector(".msg");
   const img = document.createElement("img");
   img.src = imagen.url;
@@ -990,8 +1036,100 @@ function agregarImagen(imagen) {
   img.className = "msg-img";
   div.textContent = "";
   div.appendChild(img);
+  if (textoExtra) {
+    const p = document.createElement("div");
+    p.textContent = textoExtra;
+    p.style.marginTop = "8px";
+    div.appendChild(p);
+  }
   return fila;
 }
+
+// ---------- Archivos adjuntos ----------
+let archivoActual = null;
+const TEXTO_EXT = ["txt", "md", "csv", "json", "js", "html", "htm", "css", "svg", "xml", "py", "lua", "c", "cpp", "h", "java", "ts", "log", "ini", "yml", "yaml"];
+
+function analizarArchivo(a) {
+  const ext = (a.nombre.split(".").pop() || "").toLowerCase();
+  const lineas = [
+    `📄 Archivo: ${a.nombre}`,
+    `🗂️ Tipo: ${a.tipo || ext || "desconocido"} · ${(a.tamano / 1024).toFixed(1)} KB`
+  ];
+
+  if (a.url) {
+    lineas.push(`🖼️ Imagen de ${a.ancho}×${a.alto} px. Todavía no puedo describir lo que muestra.`);
+    return lineas.join("\n");
+  }
+  if (a.texto === null) {
+    lineas.push("No puedo leer el contenido de este tipo de archivo; solo muestro sus datos.");
+    return lineas.join("\n");
+  }
+
+  const filas = a.texto.split("\n");
+  const numPalabras = a.texto.trim() ? a.texto.trim().split(/\s+/).length : 0;
+  lineas.push(`📏 ${filas.length} líneas · ${numPalabras} palabras · ${a.texto.length} caracteres`);
+
+  if (ext === "json") {
+    try {
+      const obj = JSON.parse(a.texto);
+      const detalle = Array.isArray(obj)
+        ? `lista de ${obj.length} elementos`
+        : `objeto con claves: ${Object.keys(obj).slice(0, 10).join(", ")}`;
+      lineas.push(`✅ JSON válido: ${detalle}`);
+    } catch (e) {
+      lineas.push(`❌ El JSON no es válido: ${e.message}`);
+    }
+  }
+  if (["html", "htm"].includes(ext)) {
+    lineas.push(`🏷️ Etiquetas HTML aproximadas: ${(a.texto.match(/<[a-zA-Z]/g) || []).length}`);
+  }
+  if (["js", "lua", "py", "c", "cpp", "java", "ts"].includes(ext)) {
+    const funciones = (a.texto.match(/function\s+\w+|def\s+\w+|local function\s+\w+/g) || []).length;
+    lineas.push(`🧩 Funciones detectadas: ${funciones}`);
+  }
+
+  const primeras = filas.map((l) => l.trim()).filter(Boolean).slice(0, 5);
+  if (primeras.length) {
+    lineas.push("👀 Primeras líneas:\n" + primeras.map((l) => `  ${l.slice(0, 120)}`).join("\n"));
+  }
+  return lineas.join("\n");
+}
+
+async function recibirArchivo(file) {
+  const ext = (file.name.split(".").pop() || "").toLowerCase();
+  const esImagen = file.type.startsWith("image/");
+  const esTexto = !esImagen && (TEXTO_EXT.includes(ext) || file.type.startsWith("text/") || file.type === "application/json");
+  const info = { nombre: file.name, tipo: file.type, tamano: file.size, texto: null, url: null, ancho: null, alto: null };
+
+  if (esTexto) {
+    info.texto = await file.slice(0, 200000).text();
+  }
+  if (esImagen) {
+    info.url = await new Promise((res) => {
+      const r = new FileReader();
+      r.onload = () => res(r.result);
+      r.readAsDataURL(file);
+    });
+    await new Promise((res) => {
+      const img = new Image();
+      img.onload = () => { info.ancho = img.naturalWidth; info.alto = img.naturalHeight; res(); };
+      img.src = info.url;
+    });
+    agregarImagen(info);
+  } else {
+    agregarMensaje(`📎 ${file.name} (${(file.size / 1024).toFixed(1)} KB)`, "usuario");
+  }
+
+  archivoActual = info;
+  agregarMensaje(`Archivo recibido. Escribe "analiza el archivo", "resume el archivo" o "qué dice el archivo".`, "eloboth");
+}
+
+document.getElementById("adjuntar").onclick = () => document.getElementById("archivoInput").click();
+document.getElementById("archivoInput").onchange = (e) => {
+  const f = e.target.files[0];
+  e.target.value = "";
+  if (f) recibirArchivo(f);
+};
 
 entradaForm.onsubmit = async (e) => {
   e.preventDefault();
@@ -1000,10 +1138,11 @@ entradaForm.onsubmit = async (e) => {
   if (!msg && !imagen) return;
 
   if (imagen) {
-    agregarImagen(imagen);
+    agregarImagen(imagen, msg);
     limpiarImagen();
+  } else if (msg) {
+    agregarMensaje(msg, "usuario");
   }
-  if (msg) agregarMensaje(msg, "usuario");
   texto.value = "";
 
   if (imagen && !msg) {
@@ -1017,9 +1156,12 @@ entradaForm.onsubmit = async (e) => {
   progreso = (linea) => { cuerpo.textContent = linea; };
 
   try {
-    const respuesta = await procesarComando(msg);
+    let respuesta = await procesarComando(msg);
+    if (imagen) {
+      respuesta = `📷 Recibí tu imagen (${imagen.ancho}×${imagen.alto} px) junto con tu mensaje. Todavía no puedo analizar su contenido.\n\n${respuesta}`;
+    }
     pensando.remove();
-    agregarMensaje(respuesta, "eloboth");
+    agregarMensaje(respuesta, respuesta.startsWith("<svg") ? "eloboth svg" : "eloboth");
   } catch (err) {
     pensando.remove();
     agregarMensaje(`Error en el procesamiento: ${err.message}`, "eloboth");
