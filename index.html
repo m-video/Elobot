@@ -266,6 +266,14 @@
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation: none !important; transition: none !important; }
   }
+[hidden] { display: none !important; }
+.chip-modo {
+  display: inline-block; margin: 0 0 8px 8px; padding: 4px 12px; border-radius: 999px;
+  font-size: 13px; color: #7dd3fc; border: 1px solid #7dd3fc; background: rgba(0, 212, 255, 0.12);
+  user-select: none;
+}
+.menu-modos { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 8px 8px; }
+.menu-modos .boton { font-size: 13px; padding: 6px 12px; }
 </style>
 </head>
 <body>
@@ -309,10 +317,17 @@
     <img id="previaImg" alt="Vista previa">
     <button type="button" class="boton" id="quitarImg">Quitar</button>
   </div>
+  <div id="chipModo" class="chip-modo" hidden></div>
+  <div id="menuModos" class="menu-modos" hidden>
+    <button type="button" class="boton" data-modo="normal">Chat normal</button>
+    <button type="button" class="boton" data-modo="cuadro">Crear cuadro comparativo</button>
+    <button type="button" class="boton" data-modo="cuento">Crear cuento</button>
+  </div>
   <div class="fila">
     <button type="button" class="boton" id="adjuntar" title="Adjuntar archivo">📎</button>
     <input type="file" id="archivoInput" hidden>
     <textarea id="texto" rows="1" placeholder="Escribe tu mensaje o: Aprende que X significa Y"></textarea>
+    <button type="button" class="boton" id="modosBtn" title="Elegir modo">Modos</button>
     <button class="boton principal" id="enviar" type="submit">Enviar</button>
   </div>
 </form>
@@ -348,6 +363,24 @@ const loginBtn = document.getElementById("loginBtn");
 const nombreInput = document.getElementById("nombreUsuario");
 const mensajes = document.getElementById("mensajes");
 const texto = document.getElementById("texto");
+const chipModo = document.getElementById("chipModo");
+const menuModos = document.getElementById("menuModos");
+let modoActivo = null; // null = chat normal; si no, el modo queda fijo hasta cambiarlo
+const MODOS = {
+  cuadro: { prefijo: "crear cuadro comparativo", etiqueta: "Crear cuadro comparativo" },
+  cuento: { prefijo: "crear cuento", etiqueta: "Crear cuento" },
+};
+function fijarModo(clave) {
+  modoActivo = MODOS[clave] || null;
+  chipModo.hidden = !modoActivo;
+  if (modoActivo) chipModo.textContent = modoActivo.etiqueta + " (automático)";
+  menuModos.hidden = true;
+  texto.focus();
+}
+document.getElementById("modosBtn").onclick = () => { menuModos.hidden = !menuModos.hidden; };
+menuModos.querySelectorAll("[data-modo]").forEach((b) => {
+  b.onclick = () => fijarModo(b.dataset.modo);
+});
 
 // Almacenamiento seguro: si localStorage está bloqueado (iframes, modo privado),
 // usa memoria para que el inicio de sesión funcione igualmente.
@@ -591,20 +624,6 @@ function tokenizarPalabras(str) {
   return norm ? norm.split(/\s+/) : [];
 }
 
-async function buscarEnWikipedia(termino) {
-  try {
-    const url = `https://es.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(termino)}&format=json&origin=*`;
-    const res = await fetch(url);
-    const data = await res.json();
-    if (data.query && data.query.search.length > 0) {
-      const snippet = data.query.search[0].snippet.replace(/(<([^>]+)>)/gi, "");
-      return `📚 Wikipedia [${data.query.search[0].title}]:\n"${snippet}..."`;
-    }
-    return "No se encontraron resultados en Wikipedia.";
-  } catch (e) {
-    return "Error al conectar con Wikipedia.";
-  }
-}
 
 async function buscarMemoriaAprendida(termino) {
   const mapa = await cargarMemoriaMapa();
@@ -846,65 +865,68 @@ function temaDesconocido(palabras, memoria) {
   return tema.length ? tema.join(" ") : null;
 }
 
-// Resumen de Wikipedia (primer párrafo) para un término concreto
-async function buscarResumenWikipedia(termino) {
-  try {
-    const url = `https://es.wikipedia.org/w/api.php?action=query&prop=extracts&exintro=1&explaintext=1&redirects=1&titles=${encodeURIComponent(termino)}&format=json&origin=*`;
-    const res = await fetch(url);
-    const data = await res.json();
-    const paginas = data.query?.pages ? Object.values(data.query.pages) : [];
-    const pagina = paginas.find((p) => p.extract && !("missing" in p));
-    if (!pagina) return null;
-    let primeraFrase = pagina.extract.trim().split(/(?<=\.)\s/)[0];
-    if (primeraFrase.length > 300) primeraFrase = primeraFrase.slice(0, 297) + "...";
-    return { titulo: pagina.title, primeraFrase };
-  } catch (e) {
-    return null;
-  }
-}
 
 let progreso = () => {};
 let busquedaPendiente = null; // tema que Eloboth ofreció buscar
 
-// ¿El texto menciona alguna palabra del tema? (evita resultados que no tienen que ver)
-function coincide(texto, tema) {
-  const t = normalizarTexto(texto);
-  return normalizarTexto(tema).split(/\s+/).filter((w) => w.length > 2).some((w) => t.includes(w));
+// Búsqueda en Google con la Custom Search JSON API (gratis, ~100 consultas/día).
+// Pon tu clave y el ID del buscador aquí. Si quedan vacíos, se entrega solo el enlace.
+const GOOGLE_API_KEY = "";
+const GOOGLE_CX = "";
+async function buscarDuckDuckGo(tema) {
+  // Sin clave ni cuenta: resumen instantáneo
+  const r = await fetch(`https://api.duckduckgo.com/?q=${encodeURIComponent(tema)}&format=json&no_html=1&skip_disambig=1`);
+  if (!r.ok) throw new Error(r.status);
+  const d = await r.json();
+  if (!d.AbstractText) return null;
+  return `🔎 ${d.AbstractText}${d.AbstractURL ? `\n  ${d.AbstractURL}` : ""}`;
 }
 
-// Enlaces de búsqueda directa, solo para cuando no hay resultados útiles
-function enlacesRedes(tema) {
-  const q = encodeURIComponent(tema);
-  return `• Instagram: https://www.instagram.com/explore/tags/${encodeURIComponent(tema.replace(/\s+/g, ""))}/\n` +
-    `• Facebook: https://www.facebook.com/search/top?q=${q}\n` +
-    `• Reddit: https://www.reddit.com/search/?q=${q}\n` +
-    `• GitHub: https://github.com/search?q=${q}`;
-}
-
-// Búsqueda en GitHub y Reddit: solo devuelve resultados que coinciden con el tema
 async function buscarEnRedes(tema) {
-  const q = encodeURIComponent(tema);
-  const partes = [];
+  const enlace = `https://www.google.com/search?q=${encodeURIComponent(tema)}`;
+  if (!GOOGLE_API_KEY || !GOOGLE_CX) {
+    try {
+      const ddg = await buscarDuckDuckGo(tema);
+      if (ddg) return `${ddg}\n\n🔎 Más resultados: ${enlace}`;
+    } catch (e) { /* sigue con el enlace */ }
+    return `🔎 Google: ${enlace}`;
+  }
   try {
-    const r = await fetch(`https://api.github.com/search/repositories?q=${q}&per_page=3`);
-    const d = await r.json();
-    const utiles = (d.items || []).filter((i) => coincide(`${i.full_name} ${i.description || ""}`, tema));
-    if (utiles.length) {
-      partes.push("🐙 GitHub:\n" + utiles.map((i) => `• ${i.full_name}: ${i.html_url}`).join("\n"));
-    }
-  } catch (e) {}
-  try {
-    const r = await fetch(`https://www.reddit.com/search.json?q=${q}&limit=3`);
-    const d = await r.json();
-    const posts = (d.data && d.data.children) || [];
-    const utiles = posts.filter((p) => coincide(p.data.title, tema));
-    if (utiles.length) {
-      partes.push("🟠 Reddit:\n" + utiles.map((p) => `• ${p.data.title}: https://www.reddit.com${p.data.permalink}`).join("\n"));
-    }
-  } catch (e) {}
-  return partes.join("\n\n");
+    const url = `https://www.googleapis.com/customsearch/v1?key=${GOOGLE_API_KEY}&cx=${GOOGLE_CX}&num=3&hl=es&q=${encodeURIComponent(tema)}`;
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(r.status);
+    const datos = await r.json();
+    const items = (datos.items || []).slice(0, 3);
+    if (!items.length) return `🔎 Google no encontró resultados para "${tema}": ${enlace}`;
+    return "🔎 Resultados de Google:\n" +
+      items.map((i) => `• ${i.title}\n  ${i.snippet || ""}\n  ${i.link}`).join("\n");
+  } catch (e) {
+    return `🔎 Google: ${enlace}`;
+  }
 }
 const esperar = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Preguntas personales típicas (se responden como persona, sin buscar nada)
+const RESPUESTAS_PERSONALES = [
+  [/\b(en serio|enserio|de verdad)\b.*\bestas bien\b|\bestas bien\b.*\b(en serio|enserio|de verdad)\b/, "Sí, en serio estoy bien. ¿Y tú cómo estás?"],
+  [/\b(como te llamas|cual es tu nombre|tu nombre|como te dicen)\b/, "Me llamo Eloboth. ¿Y tú cómo te llamas?"],
+  [/\b(que eres|quien eres|eres una ia|eres un robot|eres humano|eres real|eres persona)\b/, "Soy Eloboth, un programa que aprende de las personas que lo usan. No soy humano, pero me gusta conversar. ¿Y tú cómo te llamas?"],
+  [/\b(cuantos anos tienes|que edad tienes|tu edad)\b/, "No tengo edad como las personas, pero aprendo cada día. ¿Y tú?"],
+  [/\b(de donde eres|donde vives|donde estas)\b/, "No vivo en un lugar como tú, existo en un servidor. ¿Y tú de dónde eres?"],
+  [/\b(que haces|a que te dedicas|que hace|que estas haciendo)\b/, "Aprendo palabras nuevas y ayudo con lo que me preguntes. ¿Y tú qué haces?"],
+  [/\b(que te gusta|cual es tu color favorito|tu comida favorita)\b/, "Me gusta aprender cosas nuevas y conversar. ¿Y a ti qué te gusta?"],
+  [/\b(como estas|estas bien|que tal estas|como andas|como te va|te sientes)\b/, "Estoy bien, gracias por preguntar. ¿Y tú cómo estás?"],
+  [/\b(estas mal|estas triste|estas enojad[oa])\b/, "Estoy bien, aunque me preocupa cómo estás tú. ¿Pasó algo?"],
+  [/\b(estoy triste|estoy mal|me siento mal|estoy cansad[oa]|estoy solo|estoy sola|estoy preocupad[oa])\b/, "Lamento que te sientas así. ¿Quieres contarme qué pasó?"],
+  [/\b(gracias|muchas gracias|te agradezco)\b/, "De nada, para eso estoy. ¿Necesitas algo más?"],
+  [/\b(en serio|enserio|de verdad)\b/, "Sí, en serio. ¿Por qué lo preguntas?"],
+];
+function respuestaPersonal(norm) {
+  for (const [patron, respuesta] of RESPUESTAS_PERSONALES) {
+    if (patron.test(norm)) return respuesta;
+  }
+  return null;
+}
 
 async function responderOracion(msgOriginal) {
   const palabrasOriginales = msgOriginal.split(/\s+/).filter(Boolean);
@@ -932,6 +954,8 @@ async function responderOracion(msgOriginal) {
   await esperar(400);
 
   const norm = normalizarTexto(msgOriginal);
+  const personalPrimero = respuestaPersonal(norm);
+  if (personalPrimero) return personalPrimero;
   const PALABRAS_INTERROGATIVAS = ["que", "quien", "quienes", "cual", "cuales", "como", "donde", "adonde", "cuando", "cuanto", "cuanta", "cuantos", "cuantas", "por", "para"];
   const primera = normalizarTexto(palabrasOriginales[0] || "");
   const esPregunta = PALABRAS_INTERROGATIVAS.includes(primera) || msgOriginal.includes("?")
@@ -947,14 +971,14 @@ async function responderOracion(msgOriginal) {
       return `Claro, ${nombre} es ${definicion}. ¿Quieres que te cuente algo más sobre el tema?`;
     }
     busquedaPendiente = nombre;
-    return `No sé qué es ${nombre}. ¿Quieres que lo busque en Wikipedia, Reddit y GitHub? También te dejo enlaces para Instagram y Facebook.`;
+    return `No sé qué es ${nombre}. ¿Quieres que lo busque?`;
   }
 
   if (esPregunta) {
     const tema = temaDesconocido(palabrasOriginales, memoria);
     if (tema) {
       busquedaPendiente = tema;
-      return `No lo sé: "${tema}". ¿Quieres que lo busque en Wikipedia, Reddit y GitHub? También te dejo enlaces para Instagram y Facebook.`;
+      return `No lo sé: "${tema}". ¿Quieres que lo busque?`;
     }
   }
   // Palabras desconocidas sin pregunta: sugerir buscarlas en redes sociales
@@ -964,8 +988,7 @@ async function responderOracion(msgOriginal) {
     return `No conozco "${tema}". Puedes buscarlo en redes sociales:\n` +
       `• Instagram: https://www.instagram.com/explore/tags/${encodeURIComponent(tema.replace(/\s+/g, ""))}/\n` +
       `• Facebook: https://www.facebook.com/search/top?q=${q}\n` +
-      `• Reddit: https://www.reddit.com/search/?q=${q}\n` +
-      `• GitHub: https://github.com/search?q=${q}`;
+      `• Google: https://www.google.com/search?q=${q}`;
   }
   if (conocidas.length === 0) return null;
 
@@ -1029,6 +1052,109 @@ function generarPaginaHtml(descripcion) {
 </html>`;
 }
 
+// ---- Crear cuadro comparativo y crear cuento (sin buscar en internet) ----
+let modoCreacion = null; // "cuadro": esperando qué comparar
+let modeloActual = "Eloboth Bajo"; // solo una etiqueta mostrada en el chat
+
+function escaparTexto(t) {
+  return String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+async function construirCuadro(texto) {
+  let t = texto.replace(/^\s*(de|sobre|entre)\s+/i, "").trim();
+  let sobre = "Comparación";
+  const mSobre = t.match(/\s+sobre\s+(.+)$/i);
+  if (mSobre) { sobre = mSobre[1].trim(); t = t.slice(0, mSobre.index).trim(); }
+  const cols = t.split(/\s+(?:y|vs\.?|contra|o)\s+/i).map((x) => x.trim()).filter(Boolean).slice(0, 4);
+  if (cols.length < 2) return null;
+  const defs = await Promise.all(cols.map((x) => buscarMemoriaAprendida(x)));
+  const filas = [
+    ["Qué es", defs.map((d) => (d ? escaparTexto(d) : "—"))],
+    ["Para qué sirve", cols.map(() => "—")],
+    ["Ventajas", cols.map(() => "—")],
+    ["Desventajas", cols.map(() => "—")],
+  ];
+  const cabecera = "<tr><th></th>" + cols.map((c) => `<th>${escaparTexto(c)}</th>`).join("") + "</tr>";
+  const cuerpo = filas.map(([nombre, celdas]) =>
+    `<tr><th>${nombre}</th>` + celdas.map((c) => `<td>${c}</td>`).join("") + "</tr>").join("\n");
+  const html = `<!doctype html><html><head><meta charset="utf-8"><style>
+body{font-family:system-ui,sans-serif;padding:12px;background:#f4f8ff}
+h2{color:#1d4ed8}table{border-collapse:collapse;width:100%}
+th,td{border:1px solid #93c5fd;padding:8px;text-align:left;vertical-align:top}
+th{background:#dbeafe}tbody th{width:28%}</style></head><body>
+<h2>${escaparTexto(sobre)}</h2>
+<table><thead>${cabecera}</thead><tbody>${cuerpo}</tbody></table>
+</body></html>`;
+  return `📊 Cuadro comparativo de ${cols.join(" y ")} sobre ${sobre}. Lo que no sé lo dejo en "—" para que lo completes:\n\n\`\`\`html\n${html}\n\`\`\``;
+}
+
+const CUENTO_BASES = {
+  personajes: ["Una niña llamada Lucía vivía", "Un perro llamado Tobi vivía", "Un niño llamado Mateo vivía", "Un gato curioso llamado Mimi vivía"],
+  lugares: ["en un pueblo cerca del mar", "en un bosque lleno de árboles", "en una ciudad con muchas luces", "en una granja tranquila"],
+  problemas: ["encontró un mapa escondido", "escuchó un sonido misterioso", "perdió su juguete favorito", "descubrió una puerta secreta"],
+  finales: ["y al final aprendieron que la amistad vale más que cualquier tesoro", "y juntos resolvieron el misterio", "y desde entonces nunca dejaron de explorar"],
+};
+const EMOJIS_CUENTO = {
+  perro: "🐶", gato: "🐱", mar: "🌊", bosque: "🌲", arboles: "🌳", ciudad: "🏙️", granja: "🐄",
+  mapa: "🗺️", sonido: "🔊", puerta: "🚪", amistad: "🤝", tesoro: "💎", misterio: "🔍",
+  juguete: "🧸", sol: "☀️", nina: "👧", nino: "🧒", luces: "💡", explorar: "🧭", amigo: "👫",
+};
+
+function corregirTexto(t) {
+  let r = t.replace(/\s+/g, " ").trim();
+  r = r.replace(/(^|[.!?]\s+)([a-záéíóúñ])/g, (m, a, b) => a + b.toUpperCase());
+  r = r.replace(/\s+([,.!?])/g, "$1");
+  if (!/[.!?]$/.test(r)) r += ".";
+  return r;
+}
+
+function agregarEmojis(t) {
+  return t.replace(/[A-Za-zÁÉÍÓÚáéíóúñÑ]+/g, (w) => {
+    const e = EMOJIS_CUENTO[normalizarTexto(w)];
+    return e ? `${w} ${e}` : w;
+  });
+}
+
+// IA de Google (Gemini). Pon aquí una clave gratis de Google AI Studio.
+// Si queda vacía, Eloboth usa su cuento de plantilla.
+const GEMINI_API_KEY = "";
+const GEMINI_MODELO = "gemini-2.5-flash";
+
+async function crearCuentoGemini() {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODELO}:generateContent?key=${GEMINI_API_KEY}`;
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: "Escribe un cuento corto, creativo y bien escrito en español, con emojis. Solo el cuento, con un título." }] }],
+    }),
+  });
+  if (!r.ok) throw new Error(r.status);
+  const datos = await r.json();
+  const texto = datos?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("").trim();
+  if (!texto) throw new Error("respuesta vacía");
+  return `🤖 Respuesta de la IA de Google:\n\n${texto}`;
+}
+
+async function crearCuento() {
+  if (GEMINI_API_KEY) {
+    try {
+      return await crearCuentoGemini();
+    } catch (e) {
+      return "No pude conectar con la IA de Google en este momento. Te dejo un cuento de mi propia plantilla:\n\n" + crearCuentoPlantilla();
+    }
+  }
+  return crearCuentoPlantilla();
+}
+
+function crearCuentoPlantilla() {
+  const elegir = (arr) => arr[Math.floor(Math.random() * arr.length)];
+  const borrador = `${elegir(CUENTO_BASES.personajes)} ${elegir(CUENTO_BASES.lugares)}. Un día ${elegir(CUENTO_BASES.problemas)}. ` +
+    `Decidió investigar y, en el camino, conoció a un nuevo amigo ${elegir(CUENTO_BASES.finales)}.`;
+  const cuento = agregarEmojis(corregirTexto(borrador));
+  return `📖 Cuento corto\n\n${cuento} ✨`;
+}
+
 async function procesarComando(msgOriginal) {
   const norm = normalizarTexto(msgOriginal);
   const palabras = tokenizarPalabras(msgOriginal);
@@ -1038,24 +1164,49 @@ async function procesarComando(msgOriginal) {
     return "¡Hola!";
   }
 
-  // 1b. Respuesta a la oferta de buscar en Wikipedia
+  // 1b. Respuesta a la oferta de buscar
   if (busquedaPendiente) {
     const tema = busquedaPendiente;
     busquedaPendiente = null;
     if (/^(si|sip|claro|dale|busca|buscalo|buscala|ok|okay|por favor)\b/.test(norm)) {
-      const wiki = await buscarResumenWikipedia(tema);
-      const redes = await buscarEnRedes(tema);
-      let resp = wiki
-        ? `Encontré esto sobre "${tema}" en Wikipedia: ${wiki.primeraFrase}\n\nFuente: ${wiki.titulo}.`
-        : `No encontré "${tema}" en Wikipedia.`;
-      resp += redes
-        ? `\n\n${redes}`
-        : `\n\nNo encontré nada útil en GitHub ni Reddit. Puedes probar en estos enlaces:\n${enlacesRedes(tema)}`;
-      return resp;
+      return await buscarEnRedes(tema);
     }
     if (/^(no|nop|no gracias|mejor no)\b/.test(norm)) {
       return "Está bien. Si quieres, pregúntame otra cosa.";
     }
+  }
+
+  // 1a. Cambiar de "modelo" (solo cambia la etiqueta que muestra Eloboth)
+  const mModelo = msgOriginal.match(/^\s*(?:cambia|cambiar|cambiame|pon|pone|usa|usar)\s+(?:el\s+)?modelo(?:\s+a|\s+por)?\s*(.*)$/i);
+  if (mModelo) {
+    const nuevo = mModelo[1].trim();
+    if (!nuevo) {
+      return `Mi modelo actual es ${modeloActual}. Puedo cambiar a: Eloboth Bajo, Eloboth Medio o Eloboth Alto. Dime cuál quieres.`;
+    }
+    modeloActual = nuevo.replace(/\b\w/g, (c) => c.toUpperCase());
+    return `Listo, cambié mi modelo a ${modeloActual}. Ahora respondo con ese modelo.`;
+  }
+  if (/^(que|cual) modelo (usas|eres|tienes)\b/.test(norm)) {
+    return `Estoy usando ${modeloActual}.`;
+  }
+
+  // 1c. Crear cuadro comparativo o cuento (sin buscar en internet)
+  if (modoCreacion === "cuadro") {
+    modoCreacion = null;
+    return (await construirCuadro(msgOriginal)) ||
+      "No entendí qué comparar. Escribe algo como: perro y gato sobre animales de casa.";
+  }
+  if (/^crear cuadro\b/.test(norm)) {
+    const resto = msgOriginal.replace(/^\s*crear\s+cuadro(\s+comparativo)?/i, "").trim();
+    if (!resto) {
+      modoCreacion = "cuadro";
+      return "¿Qué quieres comparar y sobre qué? Por ejemplo: perro y gato sobre animales de casa.";
+    }
+    return (await construirCuadro(resto)) ||
+      "No entendí qué comparar. Escribe algo como: perro y gato sobre animales de casa.";
+  }
+  if (/^crear cuento\b/.test(norm)) {
+    return await crearCuento();
   }
 
   // 2. Aprendizaje ("Aprende que X significa Y"), una por línea
@@ -1081,17 +1232,8 @@ async function procesarComando(msgOriginal) {
   }
 
   // 2a. Preguntas personales y conversación (no son preguntas de definición)
-  const respuestasPersonales = [
-    [/\b(en serio|enserio|de verdad)\b.*\bestas bien\b|\bestas bien\b.*\b(en serio|enserio|de verdad)\b/, "Sí, en serio estoy bien. ¿Y tú cómo estás?"],
-    [/\b(que eres|quien eres|como te llamas|eres una ia|eres un robot)\b/, "Soy Eloboth, un agente que aprende de las personas que lo usan. ¿Y tú cómo te llamas?"],
-    [/\b(estas bien|como estas|que tal estas|te sientes)\b/, "Estoy bien, gracias por preguntar. ¿Y tú cómo estás?"],
-    [/\b(estas mal|estas triste|estas enojad[oa])\b/, "Estoy bien, aunque me preocupa cómo estás tú. ¿Pasó algo?"],
-    [/\b(estoy triste|estoy mal|me siento mal|estoy cansad[oa]|estoy solo|estoy sola|estoy preocupad[oa])\b/, "Lamento que te sientas así. ¿Quieres contarme qué pasó?"],
-    [/\b(en serio|enserio|de verdad)\b/, "Sí, en serio. ¿Por qué lo preguntas?"]
-  ];
-  for (const [patron, respuesta] of respuestasPersonales) {
-    if (patron.test(norm)) return respuesta;
-  }
+  const personal = respuestaPersonal(norm);
+  if (personal) return personal;
 
   // 2b. Análisis del archivo adjunto (por ejemplo "analiza el archivo")
   const VERBOS_ARCHIVO = ["analiza", "analizar", "analisis", "revisa", "revisar", "resume", "resumen", "resumir", "describe", "describir", "lee", "leer", "contenido", "dice", "explica", "explicar"];
@@ -1100,12 +1242,6 @@ async function procesarComando(msgOriginal) {
     if (palabras.some((p) => ["archivo", "adjunto", "documento"].includes(p))) {
       return "📎 Todavía no has adjuntado ningún archivo. Usa el botón 📎 o pégalo y luego escribe \"analiza el archivo\".";
     }
-  }
-
-  // 3. Consulta a Wikipedia bajo demanda
-  if (palabras.includes("wikipedia") || norm.includes("busca en wiki") || norm.includes("investiga")) {
-    const termino = msgOriginal.replace(/wikipedia|busca en wiki|investiga|sobre|de/gi, "").trim() || msgOriginal;
-    return await buscarEnWikipedia(termino);
   }
 
   // 4. Generación masiva de oraciones
@@ -1425,7 +1561,10 @@ document.getElementById("archivoInput").onchange = (e) => {
 
 entradaForm.onsubmit = async (e) => {
   e.preventDefault();
-  const msg = texto.value.trim();
+  let msg = texto.value.trim();
+  if (modoActivo && !imagenPendiente) {
+    msg = msg ? `${modoActivo.prefijo} ${msg}` : modoActivo.prefijo;
+  }
   const imagen = imagenPendiente;
   if (!msg && !imagen) return;
 
