@@ -272,6 +272,7 @@
   font-size: 13px; color: #7dd3fc; border: 1px solid #7dd3fc; background: rgba(0, 212, 255, 0.12);
   user-select: none;
 }
+.aviso-ia { margin: 6px 0 0; text-align: center; font-size: 12px; color: #8b93b0; }
 .menu-modos { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 8px 8px; }
 .menu-modos .boton { font-size: 13px; padding: 6px 12px; }
 </style>
@@ -330,6 +331,7 @@
     <button type="button" class="boton" id="modosBtn" title="Elegir modo">Modos</button>
     <button class="boton principal" id="enviar" type="submit">Enviar</button>
   </div>
+  <p class="aviso-ia">Eloboth es una IA y puede cometer errores.</p>
 </form>
 </section>
 </div>
@@ -868,11 +870,14 @@ function temaDesconocido(palabras, memoria) {
 
 let progreso = () => {};
 let busquedaPendiente = null; // tema que Eloboth ofreció buscar
+let htmlPendiente = false; // Eloboth preguntó qué debe tener el HTML que le pidieron
 
 // Búsqueda en Google con la Custom Search JSON API (gratis, ~100 consultas/día).
 // Pon tu clave y el ID del buscador aquí. Si quedan vacíos, se entrega solo el enlace.
 const GOOGLE_API_KEY = "";
 const GOOGLE_CX = "";
+// Worker de Cloudflare (sin claves): busca en Brave y lee la página del primer resultado
+const WORKER_URL = "https://eloboth.maximojosfal.workers.dev";
 // Significado desde Wikipedia en español (sin clave; se puede leer desde la página)
 // Primer artículo de Wikipedia en español para el tema: solo su mini descripción
 async function buscarPrimerArticulo(tema) {
@@ -890,7 +895,9 @@ async function buscarPrimerArticulo(tema) {
   if (!descripcion && pagina.extract) {
     descripcion = pagina.extract.replace(/\s+/g, " ").trim().split(/(?<=\.)\s+/)[0];
   }
-  return descripcion ? `📖 ${pagina.title}: ${descripcion}` : null;
+  if (!descripcion) return null;
+  const detalle = pagina.extract ? pagina.extract.replace(/\s+/g, " ").trim().split(/(?<=\.)\s+/).slice(0, 2).join(" ") : "";
+  return `📖 ${pagina.title}: ${descripcion}${detalle && detalle !== descripcion ? `. ${detalle}` : ""}`;
 }
 
 // Texto de introducción de un artículo de Wikipedia en español
@@ -982,6 +989,45 @@ function extraerDefinicionesWikcionario(wikitext, palabra) {
   return salida.length ? `📖 ${palabra}:\n${salida.join("\n")}` : null;
 }
 
+// Respuesta completa: párrafo general + "Aspectos destacados" tomados de las secciones del artículo
+const SECCIONES_OMITIDAS = /^(referencias|enlaces externos|v[ée]ase tambi[ée]n|bibliograf[ií]a|notas|fuentes|ver tambi[ée]n)/i;
+
+function armarRespuestaCompleta(titulo, textoCompleto) {
+  const partes = textoCompleto.split(/\n==+\s*(.+?)\s*==+\n/);
+  // partes[0] = introducción; luego pares [titulo de sección, contenido]
+  const intro = partes[0].replace(/\s+/g, " ").trim();
+  if (!intro) return null;
+  const introFrases = intro.split(/(?<=\.)\s+/).slice(0, 4).join(" ");
+  const destacados = [];
+  for (let i = 1; i < partes.length - 1 && destacados.length < 4; i += 2) {
+    const nombre = partes[i].trim();
+    if (SECCIONES_OMITIDAS.test(nombre)) continue;
+    const contenido = partes[i + 1].replace(/\s+/g, " ").trim();
+    if (!contenido) continue;
+    const frases = contenido.split(/(?<=\.)\s+/).slice(0, 2).join(" ");
+    destacados.push(`• ${nombre}: ${frases}`);
+  }
+  const bloques = [`📖 ${titulo}\n${introFrases}`];
+  if (destacados.length) bloques.push(`Aspectos destacados:\n${destacados.join("\n")}`);
+  return bloques.join("\n\n");
+}
+
+async function respuestaCompleta(tema) {
+  const p = (tema || "").trim();
+  if (!p) return null;
+  const busqueda = `https://es.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(p)}&srlimit=1&format=json&origin=*`;
+  const rb = await fetch(busqueda);
+  if (!rb.ok) return null;
+  const titulo = ((await rb.json())?.query?.search || [])[0]?.title;
+  if (!titulo) return null;
+  const url = `https://es.wikipedia.org/w/api.php?action=query&prop=extracts&explaintext=1&redirects=1&titles=${encodeURIComponent(titulo)}&format=json&origin=*`;
+  const r = await fetch(url);
+  if (!r.ok) return null;
+  const pagina = Object.values((await r.json())?.query?.pages || {})[0];
+  if (!pagina || !pagina.extract) return null;
+  return armarRespuestaCompleta(pagina.title, pagina.extract.slice(0, 30000));
+}
+
 // Definición de la palabra; si no existe, la de un sinónimo
 async function definirOSinonimo(palabra) {
   const directa = await buscarDiccionario(palabra).catch(() => null);
@@ -993,9 +1039,6 @@ async function definirOSinonimo(palabra) {
     const def = await buscarDiccionario(sin).catch(() => null);
     if (def) return `"${palabra}" no está en mi diccionario. Un sinónimo es "${sin}":\n${def}`;
   }
-  // Descripción de Wikidata
-  const wikidata = await buscarWikidata(palabra).catch(() => null);
-  if (wikidata) return wikidata;
   // Si no hay definición ni sinónimo, muestra los 3 primeros artículos
   const primero = await buscarPrimerArticulo(palabra).catch(() => null);
   if (primero) return primero;
@@ -1013,9 +1056,9 @@ async function buscarDiccionario(palabra) {
   const pagina = Object.values(paginas)[0];
   if (!pagina || pagina.missing !== undefined || !pagina.extract) return null;
   // Si es una página de desambiguación, no sirve como significado
-  if (/puede referirse|puede hacer referencia/i.test(pagina.extract)) return null;
+  if (/puede referirse|puede hacer referencia|hace referencia a varios|varios art[ií]culos/i.test(pagina.extract)) return null;
   const frases = pagina.extract.replace(/\s+/g, " ").trim().split(/(?<=\.)\s+/);
-  const texto = frases.slice(0, 2).join(" ");
+  const texto = frases.slice(0, 4).join(" ");
   return `📖 ${pagina.title}: ${texto}`;
 }
 
@@ -1035,8 +1078,12 @@ async function buscarEnRedes(textoOriginal) {
     .replace(/[?¿]/g, "")
     .trim() || textoOriginal;
   try {
+    const completa = await respuestaCompleta(tema);
+    if (completa) return `${completa}\n\n${preguntasDificiles(tema)}`;
+  } catch (e) { /* sigue con otras fuentes */ }
+  try {
     const def = await definirOSinonimo(tema);
-    if (def) return def;
+    if (def) return `${def}\n\n${preguntasDificiles(tema)}`;
   } catch (e) { /* sigue con otras fuentes */ }
   let resumen = null;
   try {
@@ -1365,6 +1412,260 @@ async function respuestaTraducir(msgOriginal) {
   return `Traducción al español:\n\n${traduccion}`;
 }
 
+// Preguntas más difíciles para seguir estudiando un tema
+function preguntasDificiles(tema) {
+  return `¿Quieres seguir? Prueba con estas preguntas más difíciles:\n1. ¿Cómo se relaciona ${tema} con otros conceptos parecidos?\n2. ¿Qué diferencia hay entre ${tema} y su uso en la vida diaria?`;
+}
+
+const PALABRAS_GUIA_VACIAS = new Set(["de","la","el","los","las","un","una","unos","unas","en","y","o","a","del","al","que","por","para","sobre","con","se","es","son","su","sus","guia","guias","estudio","estudios","quiero"]);
+
+// Guía de estudio: busca lo que no conoce, une los significados y arma preguntas para repasar
+async function guiaDeEstudio(textoOriginal) {
+  const tema = textoOriginal
+    .replace(/^\s*(?:quiero\s+)?(?:una?\s+)?gu[ií]a\s+de\s+estudios?\s*(?:sobre|de|para)?\s*/i, "")
+    .trim();
+  if (!tema) return "Dime sobre qué tema quieres la guía. Por ejemplo: guía de estudio sobre la fotosíntesis.";
+
+  progreso("📚 Armando la guía de estudio...");
+  await esperar(500);
+  const palabras = tema.split(/\s+/)
+    .map((p) => p.replace(/[^\p{L}]/gu, "").toLowerCase())
+    .filter((p) => p && !PALABRAS_GUIA_VACIAS.has(normalizarTexto(p)));
+  const unicas = [...new Set(palabras)].slice(0, 6);
+
+  const conceptos = [];
+  const noPudo = [];
+  for (const p of unicas) {
+    progreso(`🧠 Pensando qué significa "${p}"...`);
+    await esperar(400);
+    const guardado = await buscarMemoriaAprendida(p).catch(() => null);
+    const significado = guardado || (await definirOSinonimo(p).catch(() => null));
+    if (significado) {
+      const limpio = significado.replace(/^📖[^:]*:\s*/, "").replace(/\s*\n\s*/g, " ").trim();
+      conceptos.push(`• ${p}: ${limpio}`);
+    } else {
+      noPudo.push(p);
+    }
+  }
+
+  progreso("🔗 Uniendo los significados...");
+  await esperar(600);
+  const intro = await introWikipedia(tema).catch(() => null);
+  const resumen = intro ? intro.texto.split(/(?<=\.)\s+/).slice(0, 3).join(" ") : null;
+
+  if (!conceptos.length && !resumen) {
+    return `No lo pude hacer: no encontré información sobre "${tema}".`;
+  }
+  const partes = [`📚 Guía de estudio: ${tema}`];
+  if (resumen) partes.push(`Resumen: ${resumen}`);
+  if (conceptos.length) partes.push(`Conceptos clave:\n${conceptos.join("\n")}`);
+  if (noPudo.length) partes.push(`No lo pude hacer con: ${noPudo.join(", ")}.`);
+  const base = unicas[0] || tema;
+  partes.push(`Preguntas para repasar:\n1. ¿Cómo se relaciona ${tema} con ${base}?\n2. ¿Qué diferencia hay entre ${tema} y un concepto parecido?\n3. ¿Dónde se ve ${tema} en la vida diaria?`);
+  return partes.join("\n\n");
+}
+
+// ---- Extraer de un texto solo lo que responde a la pregunta ----
+const STOP_RESPUESTA = new Set(["que","quien","quienes","cuando","cuanto","cuanta","cuantos","cuantas","donde","como","cual","cuales","por","para","de","del","la","el","los","las","un","una","unos","unas","en","y","o","a","al","es","son","fue","fueron","era","eran","se","su","sus","con","sobre","ser","hay","hubo","significa","significan","hizo","pasa","paso"]);
+
+function tipoDePregunta(pregunta) {
+  const n = normalizarTexto(pregunta);
+  if (/^cuando\b/.test(n)) return "cuando";
+  if (/^(quien|quienes)\b/.test(n)) return "quien";
+  if (/^donde\b/.test(n)) return "donde";
+  if (/^(cuanto|cuanta|cuantos|cuantas)\b/.test(n)) return "cuanto";
+  return "que";
+}
+
+// Palabras clave de la pregunta; se comparan por el inicio de la palabra para aceptar plurales y variantes
+function clavesDePregunta(pregunta) {
+  return normalizarTexto(pregunta).split(" ")
+    .filter((w) => w.length >= 3 && !STOP_RESPUESTA.has(w))
+    .map((w) => w.slice(0, 5));
+}
+
+// Bonus según el tipo de pregunta: años para "cuándo", números para "cuánto", definiciones para "qué es"
+function bonusPorTipo(oracion, tipo) {
+  const n = normalizarTexto(oracion);
+  if (tipo === "cuando") return (/\b(1\d{3}|20\d{2})\b/.test(n) ? 2 : 0) + (/\bsiglos?\b/.test(n) ? 1 : 0);
+  if (tipo === "cuanto") return /\d/.test(n) ? 2 : 0;
+  if (tipo === "quien") return /\b(fue|es|era|son)\b/.test(n) ? 1 : 0;
+  if (tipo === "donde") return /\b(en|ubicad[oa]|situad[oa]|localizad[oa])\b/.test(n) ? 1 : 0;
+  return /\b(es|son|consiste|define|refiere)\b/.test(n) ? 1 : 0;
+}
+
+// Devuelve como máximo 3 oraciones importantes que responden a la pregunta, en su orden original
+const MAX_ORACIONES_RESPUESTA = 3;
+function tieneNumero(oracion) {
+  const n = normalizarTexto(oracion);
+  return /\d/.test(n) || /\bsiglo\s+[ivxlc]+\b/.test(n);
+}
+
+function extraerRespuesta(texto, pregunta) {
+  if (!texto) return null;
+  const oraciones = texto.replace(/\s+/g, " ").trim().split(/(?<=[.!?])\s+/).filter((o) => o.length > 15);
+  const claves = clavesDePregunta(pregunta);
+  const tipo = tipoDePregunta(pregunta);
+  const puntuadas = oraciones.map((o, idx) => {
+    const palabras = normalizarTexto(o).split(" ");
+    const coincidencias = claves.filter((c) => palabras.some((w) => w.startsWith(c))).length;
+    const n = normalizarTexto(o);
+    const tiempo = /(comenz|termin|inici|finaliz|desde|hasta|entre|durante|ocurri)/.test(n);
+    const fechaTemporal = tipo === "cuando" && /\b\d{3,4}\b/.test(n) && tiempo;
+    return { o, idx, coincidencias, tiempo, score: coincidencias * 2 + bonusPorTipo(o, tipo) + (fechaTemporal ? 6 : 0) };
+  });
+  let candidatas;
+  if (tipo === "cuando") {
+    // "cuándo": solo oraciones con números (años o siglos)
+    candidatas = puntuadas.filter((x) => tieneNumero(x.o) && (x.coincidencias >= 1 || x.tiempo));
+  } else {
+    candidatas = puntuadas.filter((x) => x.coincidencias >= 1 || claves.length === 0);
+  }
+  if (!candidatas.length) return null;
+  const elegidas = candidatas
+    .sort((a, b) => b.score - a.score || a.idx - b.idx)
+    .slice(0, MAX_ORACIONES_RESPUESTA)
+    .sort((a, b) => a.idx - b.idx);
+  return elegidas.map((x) => x.o.slice(0, 400)).join(" ");
+}
+
+// Google (Custom Search API): busca la pregunta y extrae de los resultados lo que responde
+// Necesita GOOGLE_API_KEY y GOOGLE_CX arriba en el archivo; si están vacíos, no se usa
+async function respuestaDeGoogle(pregunta) {
+  if (!GOOGLE_API_KEY || !GOOGLE_CX) return null;
+  const url = `https://www.googleapis.com/customsearch/v1?key=${encodeURIComponent(GOOGLE_API_KEY)}&cx=${encodeURIComponent(GOOGLE_CX)}&num=5&hl=es&lr=lang_es&q=${encodeURIComponent(pregunta)}`;
+  const r = await fetch(url);
+  if (!r.ok) return null;
+  const items = (await r.json())?.items || [];
+  if (!items.length) return null;
+  const textos = items
+    .map((i) => (i.snippet || "").replace(/\s+/g, " ").replace(/[.…\s]+$/, "") + ".")
+    .join(" ");
+  const extraido = extraerRespuesta(textos, pregunta);
+  return extraido ? `🔎 Google: ${extraido}` : null;
+}
+
+// Worker: Brave busca la pregunta; el worker devuelve el resumen con IA de Brave o el texto del primer resultado, y Eloboth extrae lo que responde
+async function buscarEnWorker(pregunta) {
+  const senal = typeof AbortSignal !== "undefined" && AbortSignal.timeout ? AbortSignal.timeout(30000) : undefined;
+  const r = await fetch(`${WORKER_URL}/?q=${encodeURIComponent(pregunta)}`, { signal: senal });
+  if (!r.ok) return null;
+  const d = await r.json();
+  return d && (d.resumen || d.texto) ? d : null;
+}
+
+// Texto de la página del primer resultado de Brave: solo las oraciones que responden a la pregunta
+function respuestaDeTexto(d, pregunta) {
+  if (!d || !d.texto) return null;
+  const extraido = extraerRespuesta(d.texto, pregunta);
+  if (!extraido) return null;
+  // Del título se quita el nombre del sitio ("Edad Media - Wikipedia..." -> "Edad Media")
+  const titulo = (d.titulo || "").split(/\s[-|–]\s/)[0].trim();
+  return titulo ? `🔎 ${titulo}: ${extraido}` : `🔎 ${extraido}`;
+}
+
+// Wikipedia: busca la pregunta (y luego el tema) y extrae de su artículo lo que responde
+async function respuestaDeWikipedia(pregunta, tema) {
+  for (const consulta of [pregunta, tema]) {
+    const rb = await fetch(`https://es.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(consulta)}&srlimit=1&format=json&origin=*`);
+    if (!rb.ok) continue;
+    const titulo = ((await rb.json())?.query?.search || [])[0]?.title;
+    if (!titulo) continue;
+    const r = await fetch(`https://es.wikipedia.org/w/api.php?action=query&prop=extracts&explaintext=1&redirects=1&titles=${encodeURIComponent(titulo)}&format=json&origin=*`);
+    if (!r.ok) continue;
+    const pagina = Object.values((await r.json())?.query?.pages || {})[0];
+    if (!pagina || !pagina.extract) continue;
+    // Los títulos de sección ("== Premios ==") se vuelven pausas entre oraciones
+    const texto = pagina.extract.replace(/={2,}[^=\n]+={2,}/g, ". ").slice(0, 60000);
+    const extraido = extraerRespuesta(texto, pregunta);
+    if (extraido) return `📖 ${pagina.title}\n${extraido}`;
+  }
+  return null;
+}
+
+// DuckDuckGo: lee el resumen y extrae lo que responde a la pregunta
+async function respuestaDeDuckDuckGo(pregunta) {
+  const r = await fetch(`https://api.duckduckgo.com/?q=${encodeURIComponent(pregunta)}&format=json&no_html=1&skip_disambig=1`);
+  if (!r.ok) return null;
+  const d = await r.json();
+  if (!d.AbstractText) return null;
+  const extraido = extraerRespuesta(d.AbstractText, pregunta);
+  return extraido ? `🔎 ${extraido}` : null;
+}
+
+// ---- Preguntas sobre un tema ----
+const PALABRAS_TEMA_VACIAS = new Set(["de","la","el","los","las","un","una","en","y","o","a","del","al","que","por","para","sobre","con","se","es","son","fue","fueron","era","eran","cuando","cual","cuales","donde","como","quien","quienes","cuanto","cuanta","cuantos","cuantas","su","sus","hay","entre","hubo","hasta","desde","relaciona","relacionan","relacion","diferencia","diferencias","hace","hacen","pasa","pasan","tiene","tienen","existe","significa","significan","ser","estar","uso","vida","diaria"]);
+
+function esPreguntaTema(msgOriginal, norm) {
+  if (norm === "que es eso") return false;
+  const pideTema = /^(dime|cuentame|explicame|quiero saber|hablame)\b/.test(norm);
+  const empiezaConPregunta = pideTema || /^(que|quien|quienes|cuando|cuanto|cuanta|cuantos|cuantas|donde|como|cual|cuales|por que|para que|de que|a que)\b/.test(norm);
+  const pocasPalabras = norm.split(" ").length <= 4 && msgOriginal.includes("?");
+  return empiezaConPregunta || pocasPalabras;
+}
+
+// Quita las palabras de pregunta y deja el tema ("cuándo fue la edad media" -> "edad media")
+function extraerTema(texto) {
+  return texto
+    .replace(/[?¿!¡]/g, "")
+    .trim()
+    .replace(/^(qu[eé]|qui[eé]n(?:es)?|cu[aá]ndo|cu[aá]nt[oa]s?|d[oó]nde|c[oó]mo|cu[aá]l(?:es)?|por qu[eé]|para qu[eé]|de qu[eé]|a qu[eé])\s+/i, "")
+    .replace(/^(es|son|fue|fueron|era|eran|significa|significan|sirve|hace|hizo|pasó|pasa|ocurri[oó])\s+/i, "")
+    .replace(/^(dime|cu[eé]ntame|expl[ií]came|h[aá]blame|quiero saber)\s+(todo\s+)?(sobre\s+|de\s+)?/i, "")
+    .replace(/^todo\s+(sobre\s+|de\s+)?/i, "")
+    .replace(/^(el|la|los|las|un|una)\s+/i, "")
+    .trim();
+}
+
+// 1) Brave: si da resumen con IA, esa es la respuesta  2) Significado de palabras  3) Brave (texto), DuckDuckGo y Wikipedia
+async function responderPregunta(msgOriginal) {
+  const tema = extraerTema(msgOriginal);
+  if (!tema) return "¿Sobre qué quieres saber?";
+  const palabras = tema.split(/\s+/)
+    .map((p) => p.replace(/[^\p{L}]/gu, "").toLowerCase())
+    .filter((p) => p && !PALABRAS_TEMA_VACIAS.has(normalizarTexto(p)));
+
+  const preguntaExacta = msgOriginal.replace(/[?¿!¡]/g, "").trim();
+
+  // Si es una sola palabra que ya sé, respondo directo
+  if (!/\s/.test(tema)) {
+    const guardado = await buscarMemoriaAprendida(tema).catch(() => null);
+    if (guardado) return `${tema} es ${guardado}`;
+  }
+
+  // Primero: Brave. Si muestra su resumen con IA, esa es la única respuesta
+  progreso(`🔎 Buscando "${preguntaExacta}"...`);
+  const brave = await buscarEnWorker(preguntaExacta).catch(() => null);
+  if (brave && brave.resumen) return brave.resumen;
+
+  // Después: significado de las palabras, solo si piden un significado o es una sola palabra
+  const pideSignificado = /signific/.test(normalizarTexto(msgOriginal)) || palabras.length === 1;
+  const significados = [];
+  for (const p of pideSignificado ? [...new Set(palabras)].slice(0, 5) : []) {
+    const guardado = await buscarMemoriaAprendida(p).catch(() => null);
+    if (guardado) continue;
+    progreso(`🧠 Buscando el significado de "${p}"...`);
+    const def = await definirOSinonimo(p).catch(() => null);
+    if (def) significados.push(`• ${p}: ${def.replace(/^📖[^:]*:\s*/, "").replace(/\s*\n\s*/g, " ").trim()}`);
+  }
+
+  // Sin resumen de IA: texto de la página de Brave, DuckDuckGo y Wikipedia
+  let respuesta = await respuestaDeGoogle(preguntaExacta).catch(() => null);
+  if (!respuesta) respuesta = respuestaDeTexto(brave, preguntaExacta);
+  if (!respuesta) respuesta = await respuestaDeDuckDuckGo(preguntaExacta).catch(() => null);
+  if (!respuesta) respuesta = await respuestaDeWikipedia(preguntaExacta, tema).catch(() => null);
+  if (!respuesta) respuesta = await buscarWikidata(tema).catch(() => null);
+
+  if (!respuesta) {
+    const dato = `No encontré una respuesta sobre "${tema}". Puedes enseñármela: Aprende que ${tema} significa ...`;
+    return significados.length ? `${significados.join("\n")}\n\n${dato}` : dato;
+  }
+  const bloques = [];
+  if (significados.length) bloques.push(`Significado de palabras:\n${significados.join("\n")}`);
+  bloques.push(respuesta);
+  return bloques.join("\n\n");
+}
+
 async function procesarComando(msgOriginal) {
   const norm = normalizarTexto(msgOriginal);
   const palabras = tokenizarPalabras(msgOriginal);
@@ -1384,6 +1685,12 @@ async function procesarComando(msgOriginal) {
     if (/^(no|nop|no gracias|mejor no)\b/.test(norm)) {
       return "Está bien. Si quieres, pregúntame otra cosa.";
     }
+  }
+
+  // 1a-html. Respuesta a "¿qué debe tener el HTML?"
+  if (htmlPendiente) {
+    htmlPendiente = false;
+    return await procesarComando("escribe html " + msgOriginal);
   }
 
   // 1a. Cambiar de "modelo" (solo cambia la etiqueta que muestra Eloboth)
@@ -1453,6 +1760,12 @@ async function procesarComando(msgOriginal) {
       return "📎 Todavía no has adjuntado ningún archivo. Usa el botón 📎 o pégalo y luego escribe \"analiza el archivo\".";
     }
   }
+
+  // 3-pregunta. Preguntas sobre un tema
+  if (esPreguntaTema(msgOriginal, norm)) return await responderPregunta(msgOriginal);
+
+  // 3-guia. Guía de estudio
+  if (/guia de estudio/.test(norm)) return await guiaDeEstudio(msgOriginal);
 
   // 3a. Traducir un texto largo al español ("traduce al español: ...")
   const traduccion = await respuestaTraducir(msgOriginal);
@@ -1575,10 +1888,17 @@ async function procesarComando(msgOriginal) {
     parrafo: `<p>Este es un párrafo de ejemplo.</p>`,
     pagina: `<!DOCTYPE html>\n<html lang="es">\n<head>\n  <meta charset="UTF-8">\n  <meta name="viewport" content="width=device-width, initial-scale=1.0">\n  <title>Mi página</title>\n</head>\n<body>\n  <h1>¡Hola!</h1>\n  <p>Esta es mi primera página.</p>\n</body>\n</html>`
   };
-  const pideEscribir = /\b(escriba|escribe|escribir|crea|crear|cree|genera|genere|generar|haz|hazme|dame|quiero|quieres|puedes)\b/.test(norm);
+  const pideEscribir = /\b(escriba|escribe|escribir|crea|crear|cree|genera|genere|generar|haz|hazme|hace|hacer|hagame|haga|dame|quiero|quieres|puedes)\b/.test(norm);
   if (palabras.includes("html") && pideEscribir) {
     let clave = Object.keys(PLANTILLAS_HTML).find((k) => palabras.includes(k));
     if (!clave && palabras.includes("link")) clave = "enlace";
+    // Sin descripción de lo que debe tener: se pregunta antes de crearlo
+    const relleno = new Set(["html","hace","hacer","hagame","haga","haz","hazme","crea","crear","cree","genera","genere","generar","escribe","escriba","escribir","dame","quiero","quieres","puedes","un","una","unos","unas","el","la","me","por","favor","pagina","página","de","para"]);
+    const resto = palabras.filter((p) => !relleno.has(p) && !relleno.has(normalizarTexto(p)));
+    if (!clave && resto.length === 0) {
+      htmlPendiente = true;
+      return "¿Qué quieres que tenga el HTML? Por ejemplo: un botón, un formulario, una tabla, una lista o una página sobre un tema.";
+    }
     if (!clave) clave = "pagina";
     const nombre = clave === "pagina" ? "una página" : clave;
     return `Aquí tienes HTML de ${nombre}:\n\`\`\`html\n${clave === "pagina" ? generarPaginaHtml(msgOriginal) : PLANTILLAS_HTML[clave]}\n\`\`\``;
@@ -1776,6 +2096,13 @@ document.getElementById("archivoInput").onchange = (e) => {
   e.target.value = "";
   if (f) recibirArchivo(f);
 };
+
+texto.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+    e.preventDefault();
+    entradaForm.requestSubmit();
+  }
+});
 
 entradaForm.onsubmit = async (e) => {
   e.preventDefault();
