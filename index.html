@@ -873,36 +873,51 @@ let busquedaPendiente = null; // tema que Eloboth ofreció buscar
 // Pon tu clave y el ID del buscador aquí. Si quedan vacíos, se entrega solo el enlace.
 const GOOGLE_API_KEY = "";
 const GOOGLE_CX = "";
+// Significado desde Wikipedia en español (sin clave; se puede leer desde la página)
+async function buscarDiccionario(palabra) {
+  const p = (palabra || "").trim();
+  if (!p || /\s/.test(p)) return null;
+  const url = `https://es.wikipedia.org/w/api.php?action=query&prop=extracts&exintro=1&explaintext=1&redirects=1&titles=${encodeURIComponent(p)}&format=json&origin=*`;
+  const r = await fetch(url);
+  if (!r.ok) return null;
+  const datos = await r.json();
+  const paginas = datos?.query?.pages || {};
+  const pagina = Object.values(paginas)[0];
+  if (!pagina || pagina.missing !== undefined || !pagina.extract) return null;
+  // Si es una página de desambiguación, no sirve como significado
+  if (/puede referirse|puede hacer referencia/i.test(pagina.extract)) return null;
+  const frases = pagina.extract.replace(/\s+/g, " ").trim().split(/(?<=\.)\s+/);
+  const texto = frases.slice(0, 2).join(" ");
+  return `📖 ${pagina.title}: ${texto}`;
+}
+
+// Búsqueda general: resumen instantáneo de DuckDuckGo (sin clave)
 async function buscarDuckDuckGo(tema) {
-  // Sin clave ni cuenta: resumen instantáneo
   const r = await fetch(`https://api.duckduckgo.com/?q=${encodeURIComponent(tema)}&format=json&no_html=1&skip_disambig=1`);
   if (!r.ok) throw new Error(r.status);
   const d = await r.json();
   if (!d.AbstractText) return null;
-  return `🔎 ${d.AbstractText}${d.AbstractURL ? `\n  ${d.AbstractURL}` : ""}`;
+  return `🔎 ${d.AbstractText}`;
 }
 
-async function buscarEnRedes(tema) {
-  const enlace = `https://www.google.com/search?q=${encodeURIComponent(tema)}`;
-  if (!GOOGLE_API_KEY || !GOOGLE_CX) {
-    try {
-      const ddg = await buscarDuckDuckGo(tema);
-      if (ddg) return `${ddg}\n\n🔎 Más resultados: ${enlace}`;
-    } catch (e) { /* sigue con el enlace */ }
-    return `🔎 Google: ${enlace}`;
-  }
+async function buscarEnRedes(textoOriginal) {
+  // Quita "qué es", "quién es", etc. para buscar solo el tema
+  const tema = textoOriginal
+    .replace(/^\s*(que|quien|quienes|cual|cuales)\s+(es|son|significa|significan)\s+/i, "")
+    .replace(/[?¿]/g, "")
+    .trim() || textoOriginal;
   try {
-    const url = `https://www.googleapis.com/customsearch/v1?key=${GOOGLE_API_KEY}&cx=${GOOGLE_CX}&num=3&hl=es&q=${encodeURIComponent(tema)}`;
-    const r = await fetch(url);
-    if (!r.ok) throw new Error(r.status);
-    const datos = await r.json();
-    const items = (datos.items || []).slice(0, 3);
-    if (!items.length) return `🔎 Google no encontró resultados para "${tema}": ${enlace}`;
-    return "🔎 Resultados de Google:\n" +
-      items.map((i) => `• ${i.title}\n  ${i.snippet || ""}\n  ${i.link}`).join("\n");
+    const def = await buscarDiccionario(tema);
+    if (def) return def;
+  } catch (e) { /* sigue con otras fuentes */ }
+  let resumen = null;
+  try {
+    resumen = await buscarDuckDuckGo(tema);
   } catch (e) {
-    return `🔎 Google: ${enlace}`;
+    resumen = null;
   }
+  if (resumen) return resumen;
+  return `No encontré un resumen sobre "${tema}".`;
 }
 const esperar = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -970,25 +985,23 @@ async function responderOracion(msgOriginal) {
     if (definicion) {
       return `Claro, ${nombre} es ${definicion}. ¿Quieres que te cuente algo más sobre el tema?`;
     }
-    busquedaPendiente = nombre;
-    return `No sé qué es ${nombre}. ¿Quieres que lo busque?`;
+    const buscado = msgOriginal.trim().replace(/[?¿]/g, "").trim();
+    progreso(`🔎 No sé qué es ${nombre}, lo busco...`);
+    return await buscarEnRedes(buscado);
   }
 
   if (esPregunta) {
     const tema = temaDesconocido(palabrasOriginales, memoria);
     if (tema) {
-      busquedaPendiente = tema;
-      return `No lo sé: "${tema}". ¿Quieres que lo busque?`;
+      const buscado = msgOriginal.trim().replace(/[?¿]/g, "").trim();
+      progreso(`🔎 No lo sé, lo busco...`);
+      return await buscarEnRedes(buscado);
     }
   }
   // Palabras desconocidas sin pregunta: sugerir buscarlas en redes sociales
   if (conocidas.length === 0 && desconocidas.length) {
     const tema = desconocidas.join(" ");
-    const q = encodeURIComponent(tema);
-    return `No conozco "${tema}". Puedes buscarlo en redes sociales:\n` +
-      `• Instagram: https://www.instagram.com/explore/tags/${encodeURIComponent(tema.replace(/\s+/g, ""))}/\n` +
-      `• Facebook: https://www.facebook.com/search/top?q=${q}\n` +
-      `• Google: https://www.google.com/search?q=${q}`;
+    return `No conozco "${tema}". Si quieres, pregúntame qué significa y lo busco.`;
   }
   if (conocidas.length === 0) return null;
 
@@ -1008,7 +1021,18 @@ async function responderOracion(msgOriginal) {
 
   // Conversación normal: responder sin definiciones
   if (desconocidas.length) {
-    return `Entendido. Hay palabras que todavía no conozco: ${desconocidas.map((d) => `"${d}"`).join(", ")}. ¿Me explicas qué significan?`;
+    // Busca el significado de cada palabra desconocida en DuckDuckGo
+    const partes = [];
+    for (const d of desconocidas.slice(0, 3)) {
+      progreso(`🔎 Buscando "${d}"...`);
+      let info = null;
+      try { info = await buscarDiccionario(d); } catch (e) { info = null; }
+      if (!info) { try { info = await buscarDuckDuckGo(`significado ${d}`); } catch (e) { info = null; } }
+      partes.push(info
+        ? `"${d}": ${info}`
+        : `"${d}": no encontré su significado. Puedes enseñármelo: Aprende que ${d} significa ...`);
+    }
+    return partes.join("\n\n");
   }
   return "Entendido. ¿Quieres que te explique alguna de esas palabras?";
 }
