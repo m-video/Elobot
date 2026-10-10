@@ -874,6 +874,134 @@ let busquedaPendiente = null; // tema que Eloboth ofreció buscar
 const GOOGLE_API_KEY = "";
 const GOOGLE_CX = "";
 // Significado desde Wikipedia en español (sin clave; se puede leer desde la página)
+// Primer artículo de Wikipedia en español para el tema: solo su mini descripción
+async function buscarPrimerArticulo(tema) {
+  const busqueda = `https://es.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(tema)}&srlimit=1&format=json&origin=*`;
+  const r = await fetch(busqueda);
+  if (!r.ok) return null;
+  const titulo = ((await r.json())?.query?.search || [])[0]?.title;
+  if (!titulo) return null;
+  const url = `https://es.wikipedia.org/w/api.php?action=query&prop=description|extracts&exintro=1&explaintext=1&redirects=1&titles=${encodeURIComponent(titulo)}&format=json&origin=*`;
+  const rr = await fetch(url);
+  if (!rr.ok) return null;
+  const pagina = Object.values((await rr.json())?.query?.pages || {})[0];
+  if (!pagina) return null;
+  let descripcion = pagina.description;
+  if (!descripcion && pagina.extract) {
+    descripcion = pagina.extract.replace(/\s+/g, " ").trim().split(/(?<=\.)\s+/)[0];
+  }
+  return descripcion ? `📖 ${pagina.title}: ${descripcion}` : null;
+}
+
+// Texto de introducción de un artículo de Wikipedia en español
+async function introWikipedia(titulo) {
+  const url = `https://es.wikipedia.org/w/api.php?action=query&prop=extracts&exintro=1&explaintext=1&redirects=1&titles=${encodeURIComponent(titulo)}&format=json&origin=*`;
+  const r = await fetch(url);
+  if (!r.ok) return null;
+  const pagina = Object.values((await r.json())?.query?.pages || {})[0];
+  if (!pagina || !pagina.extract) return null;
+  return { titulo: pagina.title, texto: pagina.extract.replace(/\s+/g, " ").trim() };
+}
+
+// Sinónimos: frases del artículo como "también llamada X", "conocido como X" o "sinónimo de X"
+const PALABRAS_NO_SINONIMO = new Set(["de","la","el","los","las","un","una","en","y","o","a","del","al","que","por","su","sus","se","con","es","son","fue","era","esta","está","puede","pueden","tambien","también","llamado","llamada"]);
+async function buscarSinonimos(palabra) {
+  const p = (palabra || "").trim().toLowerCase();
+  if (!p || /\s/.test(p)) return [];
+  const intro = await introWikipedia(p);
+  if (!intro) return [];
+  const patron = /(?:tambi[eé]n (?:conocid[oa]|llamad[oa]|denominad[oa])(?: como)?|conocid[oa] como|llamad[oa] como|llamad[oa]|denominad[oa]|sin[oó]nimo de|o bien)\s+(?:la\s+|el\s+|los\s+|las\s+)?([a-záéíóúñ]+)/gi;
+  const encontrados = [];
+  for (const m of intro.texto.matchAll(patron)) {
+    const w = m[1];
+    const wl = w.toLowerCase();
+    if (!PALABRAS_NO_SINONIMO.has(wl) && wl !== p && !encontrados.some((x) => x.toLowerCase() === wl)) encontrados.push(w);
+  }
+  return encontrados.slice(0, 3);
+}
+
+// Wikidata en español: descripción corta de la entidad (sin clave)
+async function buscarWikidata(palabra) {
+  const p = (palabra || "").trim();
+  if (!p) return null;
+  const url = `https://www.wikidata.org/w/api.php?action=wbsearchentities&search=${encodeURIComponent(p)}&language=es&uselang=es&type=item&limit=1&format=json&origin=*`;
+  const r = await fetch(url);
+  if (!r.ok) return null;
+  const primero = ((await r.json())?.search || [])[0];
+  if (!primero || !primero.description) return null;
+  return `📚 ${primero.label}: ${primero.description}`;
+}
+
+// Wikcionario en español: definiciones numeradas de la sección en español
+async function buscarWikcionario(palabra) {
+  const p = (palabra || "").trim().toLowerCase();
+  if (!p || /\s/.test(p)) return null;
+  const url = `https://es.wiktionary.org/w/api.php?action=parse&page=${encodeURIComponent(p)}&prop=wikitext&format=json&formatversion=2&redirects=1&origin=*`;
+  const r = await fetch(url);
+  if (!r.ok) return null;
+  const wikitext = (await r.json())?.parse?.wikitext;
+  if (!wikitext) return null;
+  return extraerDefinicionesWikcionario(wikitext, p);
+}
+
+function limpiarWikcionario(t) {
+  return t
+    .replace(/\{\{[^{}]*\}\}/g, "")
+    .replace(/\[\[(?:[^|\]]*\|)?([^\]]*)\]\]/g, "$1")
+    .replace(/'{2,}/g, "")
+    .replace(/<[^>]+>/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function extraerDefinicionesWikcionario(wikitext, palabra) {
+  let enEspanol = false;
+  let categoria = "";
+  const salida = [];
+  for (const linea of wikitext.split("\n")) {
+    const nivel2 = linea.match(/^==\s*([^=].*?)\s*==\s*$/);
+    if (nivel2) {
+      if (salida.length) break;
+      enEspanol = /lengua\|es|español/i.test(nivel2[1]);
+      categoria = "";
+      continue;
+    }
+    if (!enEspanol) continue;
+    const nivel3 = linea.match(/^===\s*(.*?)\s*===\s*$/);
+    if (nivel3) {
+      categoria = nivel3[1].replace(/\{\{|\}\}/g, "").replace(/\|es/g, "").trim();
+      continue;
+    }
+    const def = linea.match(/^#\s+(?![:*#])(.+)$/);
+    if (def) {
+      const texto = limpiarWikcionario(def[1]);
+      if (texto) salida.push(categoria ? `(${categoria}) ${texto}` : texto);
+      if (salida.length >= 3) break;
+    }
+  }
+  return salida.length ? `📖 ${palabra}:\n${salida.join("\n")}` : null;
+}
+
+// Definición de la palabra; si no existe, la de un sinónimo
+async function definirOSinonimo(palabra) {
+  const directa = await buscarDiccionario(palabra).catch(() => null);
+  if (directa) return directa;
+  const wikcionario = await buscarWikcionario(palabra).catch(() => null);
+  if (wikcionario) return wikcionario;
+  const sinonimos = await buscarSinonimos(palabra).catch(() => []);
+  for (const sin of sinonimos) {
+    const def = await buscarDiccionario(sin).catch(() => null);
+    if (def) return `"${palabra}" no está en mi diccionario. Un sinónimo es "${sin}":\n${def}`;
+  }
+  // Descripción de Wikidata
+  const wikidata = await buscarWikidata(palabra).catch(() => null);
+  if (wikidata) return wikidata;
+  // Si no hay definición ni sinónimo, muestra los 3 primeros artículos
+  const primero = await buscarPrimerArticulo(palabra).catch(() => null);
+  if (primero) return primero;
+  return null;
+}
+
 async function buscarDiccionario(palabra) {
   const p = (palabra || "").trim();
   if (!p || /\s/.test(p)) return null;
@@ -907,7 +1035,7 @@ async function buscarEnRedes(textoOriginal) {
     .replace(/[?¿]/g, "")
     .trim() || textoOriginal;
   try {
-    const def = await buscarDiccionario(tema);
+    const def = await definirOSinonimo(tema);
     if (def) return def;
   } catch (e) { /* sigue con otras fuentes */ }
   let resumen = null;
@@ -917,7 +1045,7 @@ async function buscarEnRedes(textoOriginal) {
     resumen = null;
   }
   if (resumen) return resumen;
-  return `No encontré un resumen sobre "${tema}".`;
+  return `No encontré "${tema}" en Wikipedia ni en DuckDuckGo. Si me dices qué significa, la aprendo: Aprende que ${tema} significa ...`;
 }
 const esperar = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -1019,20 +1147,12 @@ async function responderOracion(msgOriginal) {
     }
   }
 
-  // Conversación normal: responder sin definiciones
+  // Oraciones con palabras desconocidas: analiza lo que conoce y pregunta por lo demás
   if (desconocidas.length) {
-    // Busca el significado de cada palabra desconocida en DuckDuckGo
-    const partes = [];
-    for (const d of desconocidas.slice(0, 3)) {
-      progreso(`🔎 Buscando "${d}"...`);
-      let info = null;
-      try { info = await buscarDiccionario(d); } catch (e) { info = null; }
-      if (!info) { try { info = await buscarDuckDuckGo(`significado ${d}`); } catch (e) { info = null; } }
-      partes.push(info
-        ? `"${d}": ${info}`
-        : `"${d}": no encontré su significado. Puedes enseñármelo: Aprende que ${d} significa ...`);
-    }
-    return partes.join("\n\n");
+    const lista = desconocidas.slice(0, 3);
+    const conoce = conocidas.length ? `Conozco: ${conocidas.map((c) => c.palabra).join(", ")}.\n` : "";
+    const preguntas = lista.map((d) => `¿Qué es ${d}?`).join("\n");
+    return `${conoce}No conozco: ${lista.map((d) => `"${d}"`).join(", ")}.\n${preguntas}\nSi me dices qué significan, las aprendo: Aprende que X significa ...`;
   }
   return "Entendido. ¿Quieres que te explique alguna de esas palabras?";
 }
@@ -1179,6 +1299,72 @@ function crearCuentoPlantilla() {
   return `📖 Cuento corto\n\n${cuento} ✨`;
 }
 
+// Palabras comunes en inglés (no existen igual en español) para detectar cuando el mensaje está en inglés
+const PALABRAS_INGLES = new Set([
+  "hello","hi","hey","bye","goodbye","good","bad","morning","night","afternoon","evening","thanks","thank","please","sorry",
+  "love","friend","friends","family","home","house","water","time","day","week","year","today","tomorrow","yesterday",
+  "name","world","book","dog","cat","school","work","happy","sad","big","small","blue","green","black","white",
+  "food","car","computer","phone","music","game","money","people","man","woman","child","sun","moon","star","tree",
+  "flower","city","country","language","english","spanish","run","walk","eat","drink","sleep","read","write","speak",
+  "think","know","want","need","like","make","go","come","see","look","help","new","old","fast","slow","hot","cold",
+  "nice","great","beautiful","strong","weak","what","where","when","why","how","who","which","this","that","these",
+  "those","there","here","with","and","the","you","your","they","them","their","we","our","my","his","her","its",
+  "have","has","had","will","would","can","could","should","do","does","did","are","was","were","be","been","not",
+  "about","from","into","over","under","more","most","very","really","always","never","sometimes","everything",
+  "something","nothing","everyone","someone","today","little","lot","please","welcome","yes","okay","ok"
+]);
+
+// Traducción de inglés a español (MyMemory: gratis, sin clave)
+async function traducirIngles(texto) {
+  const r = await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(texto)}&langpair=en|es`);
+  if (!r.ok) return null;
+  const datos = await r.json();
+  const trad = datos?.responseData?.translatedText;
+  if (!trad || trad.toLowerCase() === texto.toLowerCase()) return null;
+  return trad;
+}
+
+// Si el mensaje está en inglés (una palabra o una frase corta), lo traduce
+async function respuestaIngles(msgOriginal) {
+  const sinPrefijo = normalizarTexto(msgOriginal)
+    .replace(/^(que significa|que quiere decir|traduce|traduceme|como se dice|significa)\s+/, "")
+    .trim();
+  const partes = sinPrefijo.split(/\s+/).filter(Boolean);
+  if (!partes.length || partes.length > 6) return null;
+  const enIngles = partes.filter((p) => PALABRAS_INGLES.has(p)).length;
+  if (enIngles === 0 || enIngles < Math.ceil(partes.length / 2)) return null;
+  const trad = await traducirIngles(sinPrefijo);
+  return trad ? `"${sinPrefijo}" en inglés significa "${trad}".` : `No pude traducir "${sinPrefijo}".`;
+}
+
+// Traduce un texto largo de inglés a español (lo parte en trozos para el límite del servicio)
+async function traducirTexto(texto) {
+  const frases = texto.split(/(?<=[.!?])\s+/);
+  const trozos = [];
+  let actual = "";
+  for (const f of frases) {
+    if ((actual + " " + f).length > 400) { if (actual) trozos.push(actual); actual = f; }
+    else actual = actual ? actual + " " + f : f;
+  }
+  if (actual) trozos.push(actual);
+  const partes = [];
+  for (const t of trozos) {
+    const trad = await traducirIngles(t);
+    partes.push(trad || t);
+  }
+  return partes.join(" ");
+}
+
+// Comandos: "traduce al español: ...", "cambia de inglés a español: ..."
+async function respuestaTraducir(msgOriginal) {
+  const m = msgOriginal.match(/^\s*(?:cambia(?:r)?|pasa(?:r)?|traduce|traducir|tradu[cz]e)\b[^:]*?\b(?:a|al)\s+espa[ñn]ol\s*[:,\-]?\s*([\s\S]*)$/i);
+  if (!m) return null;
+  const texto = m[1].trim();
+  if (!texto) return "Pega el texto en inglés que quieres pasar a español.";
+  const traduccion = await traducirTexto(texto);
+  return `Traducción al español:\n\n${traduccion}`;
+}
+
 async function procesarComando(msgOriginal) {
   const norm = normalizarTexto(msgOriginal);
   const palabras = tokenizarPalabras(msgOriginal);
@@ -1267,6 +1453,14 @@ async function procesarComando(msgOriginal) {
       return "📎 Todavía no has adjuntado ningún archivo. Usa el botón 📎 o pégalo y luego escribe \"analiza el archivo\".";
     }
   }
+
+  // 3a. Traducir un texto largo al español ("traduce al español: ...")
+  const traduccion = await respuestaTraducir(msgOriginal);
+  if (traduccion) return traduccion;
+
+  // 3b. Palabras o frases en inglés: se traducen
+  const ingles = await respuestaIngles(msgOriginal);
+  if (ingles) return ingles;
 
   // 4. Generación masiva de oraciones
   if (norm.startsWith("genera oraciones") || norm.startsWith("formula oraciones")) {
