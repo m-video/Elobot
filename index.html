@@ -320,6 +320,7 @@
   }
   #texto::placeholder { color: var(--suave); }
   #mic.grabando { background: #ff4d6d; color: #fff; border-color: #ff4d6d; animation: pulso 1s infinite; }
+  #verPantalla.activo { background: linear-gradient(135deg, #6c4cff, #00e5ff); color: #04101a; border-color: transparent; animation: pulso 2s infinite; }
   #enviar { padding: 11px 20px; border-radius: 14px; }
   #enviar:disabled { opacity: .4; cursor: not-allowed; box-shadow: none; transform: none; filter: grayscale(.6); }
   .pie-entrada { max-width: 880px; margin: 6px auto 0; display: flex; justify-content: space-between; font-size: 12px; color: var(--suave); }
@@ -549,6 +550,7 @@
     <input type="file" id="archivoInput" accept="image/*,.txt,.md,.csv,.json,.js,.html,.py,.lua" hidden>
     <textarea id="texto" rows="1" placeholder="Escribe un mensaje, pega una imagen (Ctrl+V) o usa el micrófono 🎤"></textarea>
     <button type="button" class="boton icono" id="mic" title="Dictar por voz" aria-label="Dictar por voz">🎤</button>
+    <button type="button" class="boton icono" id="verPantalla" title="Ver mi pestaña o ventana" aria-label="Ver mi pestaña o ventana">🖥️</button>
     <button type="button" class="boton" id="plantillasBtn" title="Plantillas">🧩</button>
     <button type="button" class="boton" id="modosBtn" title="Elegir modo">Modos</button>
     <button class="boton principal" id="enviar" type="submit">Enviar</button>
@@ -1853,11 +1855,78 @@ texto.addEventListener("keydown", (e) => {
   }
 });
 
+// ---------- Ver mi pestaña o ventana (modo pantalla) ----------
+// El navegador no deja leer tus otras pestañas: solo se ve lo que tú eliges compartir.
+let pantallaStream = null;
+let pantallaVideo = null;
+const verPantallaBtn = $("verPantalla");
+
+function marcarPantalla() {
+  const activa = !!pantallaStream;
+  verPantallaBtn.classList.toggle("activo", activa);
+  verPantallaBtn.title = activa ? "Dejar de ver mi pantalla" : "Ver mi pestaña o ventana";
+}
+
+function detenerPantalla(avisar = true) {
+  if (pantallaStream) pantallaStream.getTracks().forEach((t) => t.stop());
+  pantallaStream = null;
+  pantallaVideo = null;
+  marcarPantalla();
+  if (avisar) toast("Dejé de ver tu pantalla");
+}
+
+async function activarPantalla() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+    toast("Tu navegador no permite compartir pantalla (prueba Chrome o Edge en computadora)");
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+    const video = document.createElement("video");
+    video.muted = true;
+    video.playsInline = true;
+    video.srcObject = stream;
+    await video.play();
+    pantallaStream = stream;
+    pantallaVideo = video;
+    // Si la persona deja de compartir desde el navegador, el modo se apaga solo
+    stream.getVideoTracks()[0].addEventListener("ended", () => detenerPantalla(true));
+    marcarPantalla();
+    toast("Listo: veo lo que compartiste. Escribe algo o envía y te ayudo");
+  } catch (e) {
+    toast("No se compartió ninguna pantalla");
+  }
+}
+
+// Toma una foto de lo que se está mostrando en la pestaña o ventana compartida
+function capturarPantalla() {
+  if (!pantallaVideo || !pantallaVideo.videoWidth) return null;
+  const escala = Math.min(1, 1024 / pantallaVideo.videoWidth);
+  const c = document.createElement("canvas");
+  c.width = Math.round(pantallaVideo.videoWidth * escala);
+  c.height = Math.round(pantallaVideo.videoHeight * escala);
+  c.getContext("2d").drawImage(pantallaVideo, 0, 0, c.width, c.height);
+  return c.toDataURL("image/jpeg", 0.8);
+}
+
+verPantallaBtn.onclick = () => {
+  if (pantallaStream) detenerPantalla(true);
+  else activarPantalla();
+};
+
 entradaForm.onsubmit = (e) => {
   e.preventDefault();
   if (mensajesRestantes() <= 0) { avisarSinMensajes(); return; }
-  const imagen = imagenPendiente;
-  const entrada = texto.value;
+  let imagen = imagenPendiente;
+  let entrada = texto.value;
+  // Con el modo pantalla activo, cada envío lleva una captura de lo que se ve ahora
+  if (!imagen && pantallaStream) {
+    const captura = capturarPantalla();
+    if (captura) {
+      imagen = { url: captura, tipo: "image/jpeg" };
+      if (!entrada.trim()) entrada = "Mira mi pantalla y dime en qué te puedo ayudar.";
+    }
+  }
   texto.value = "";
   autoajustar();
   if (imagen) {
